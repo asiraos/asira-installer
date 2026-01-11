@@ -226,7 +226,7 @@ set_mountpoints() {
     # Let user select partition
     echo -e "${GREEN}Select partition or free space:${NC}"
     SELECTED_OPTION=$(gum choose --cursor-prefix "> " --selected-prefix "* " "${PARTITION_OPTIONS[@]}")
-    PARTITION=$(echo "$SELECTED_OPTION" | cut -d' ' -f1)
+    PARTITION=$(echo "$SELECTED_OPTION" | awk '{print $1}' | tr -d '│├└─')
     
 
 
