@@ -228,19 +228,19 @@ set_mountpoints() {
     SELECTED_OPTION=$(gum choose --cursor-prefix "> " --selected-prefix "* " "${PARTITION_OPTIONS[@]}")
     PARTITION=$(echo "$SELECTED_OPTION" | cut -d' ' -f1)
     
-    # Handle free space selection
-    if [ "$PARTITION" = "FREE_SPACE" ]; then
-        create_partition_in_free_space "$disk"
-        return
-    fi
-    
-    # Verify partition exists
-    if [ ! -b "/dev/$PARTITION" ]; then
-        gum style --foreground 196 "Error: Partition /dev/$PARTITION not found"
-        gum input --placeholder "Press Enter to try again..."
-        set_mountpoints "$disk"
-        return
-    fi
+
+
+# Normalize partition name (remove /dev/ if already present)
+PARTITION="${PARTITION#/dev/}"
+
+# Verify partition exists
+if [ ! -b "/dev/$PARTITION" ]; then
+    gum style --foreground 196 "Error: Partition /dev/$PARTITION not found"
+    gum input --placeholder "Press Enter to try again..."
+    set_mountpoints "$disk"
+    return
+fi
+
     
     # Select mountpoint
     MOUNTPOINT=$(gum choose --cursor-prefix "> " --selected-prefix "* " \
