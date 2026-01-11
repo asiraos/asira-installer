@@ -420,8 +420,43 @@ format_partition() {
     local mountpoint=$2
     
     if [ "$mountpoint" = "/boot/efi" ]; then
-        gum style --foreground 205 "Formatting $partition as FAT32..."
+        gum style --foreground 205 "Formatting $partition as EFI System (FAT32)..."
         mkfs.fat -F32 "$partition"
+    elif [ "$mountpoint" = "/boot" ]; then
+        # Check if system is EFI or BIOS
+        if [ -d "/sys/firmware/efi" ]; then
+            # EFI system - format as FAT32
+            FS_TYPE=$(gum choose --cursor-prefix "> " --selected-prefix "* " \
+                "EFI System (FAT32)")
+            gum style --foreground 205 "Formatting $partition as EFI System (FAT32)..."
+            mkfs.fat -F32 "$partition"
+        else
+            # BIOS/MBR system - show regular filesystem options
+            FS_TYPE=$(gum choose --cursor-prefix "> " --selected-prefix "* " \
+                "ext4" \
+                "ext3" \
+                "xfs" \
+                "btrfs")
+            
+            case $FS_TYPE in
+                "ext4")
+                    gum style --foreground 205 "Formatting $partition as ext4..."
+                    mkfs.ext4 "$partition"
+                    ;;
+                "ext3")
+                    gum style --foreground 205 "Formatting $partition as ext3..."
+                    mkfs.ext3 "$partition"
+                    ;;
+                "xfs")
+                    gum style --foreground 205 "Formatting $partition as xfs..."
+                    mkfs.xfs "$partition"
+                    ;;
+                "btrfs")
+                    gum style --foreground 205 "Formatting $partition as btrfs..."
+                    mkfs.btrfs "$partition"
+                    ;;
+            esac
+        fi
     elif [ "$mountpoint" = "swap" ]; then
         gum style --foreground 205 "Setting up swap on $partition..."
         mkswap "$partition"
@@ -677,11 +712,7 @@ create_basic_partitions_wholedisk() {
     
     # Format partitions
     echo -e "${CYAN}Formatting partitions...${NC}"
-    if [ "$BOOT_MODE" = "EFI" ]; then
-        mkfs.fat -F32 "$BOOT_DEV"
-    else
-        mkfs.ext4 "$BOOT_DEV"
-    fi
+    mkfs.fat -F32 "$BOOT_DEV"
     mkfs.ext4 "$ROOT_DEV"
     
     # Save mountpoints
@@ -750,11 +781,7 @@ create_standard_partitions_wholedisk() {
     
     # Format partitions
     echo -e "${CYAN}Formatting partitions...${NC}"
-    if [ "$BOOT_MODE" = "EFI" ]; then
-        mkfs.fat -F32 "$BOOT_DEV"
-    else
-        mkfs.ext4 "$BOOT_DEV"
-    fi
+    mkfs.fat -F32 "$BOOT_DEV"
     mkfs.ext4 "$ROOT_DEV"
     mkfs.ext4 "$HOME_DEV"
     
@@ -860,11 +887,7 @@ create_custom_partitions_wholedisk() {
         BOOT_DEV="/dev/${disk}${current_part}"
     fi
     
-    if [ "$BOOT_MODE" = "EFI" ]; then
-        mkfs.fat -F32 "$BOOT_DEV"
-    else
-        mkfs.ext4 "$BOOT_DEV"
-    fi
+    mkfs.fat -F32 "$BOOT_DEV"
     echo "$BOOT_DEV -> $BOOT_MOUNTPOINT" >> /tmp/asiraos/mounts
     ((current_part++))
     
@@ -1032,13 +1055,8 @@ create_basic_partitions_freespace() {
     
     # Format partitions
     echo -e "${CYAN}Formatting partitions...${NC}"
-    if [ "$BOOT_MODE" = "EFI" ]; then
-        echo -e "${GREEN}Formatting $BOOT_DEV as FAT32...${NC}"
-        mkfs.fat -F32 "$BOOT_DEV"
-    else
-        echo -e "${GREEN}Formatting $BOOT_DEV as ext4...${NC}"
-        mkfs.ext4 "$BOOT_DEV"
-    fi
+    echo -e "${GREEN}Formatting $BOOT_DEV as FAT32...${NC}"
+    mkfs.fat -F32 "$BOOT_DEV"
     
     echo -e "${GREEN}Formatting $ROOT_DEV as ext4...${NC}"
     mkfs.ext4 "$ROOT_DEV"
@@ -1123,11 +1141,7 @@ create_standard_partitions_freespace() {
     fi
     
     # Format partitions
-    if [ "$BOOT_MODE" = "EFI" ]; then
-        mkfs.fat -F32 "$BOOT_DEV"
-    else
-        mkfs.ext4 "$BOOT_DEV"
-    fi
+    mkfs.fat -F32 "$BOOT_DEV"
     mkfs.ext4 "$ROOT_DEV"
     mkfs.ext4 "$HOME_DEV"
     
@@ -1242,11 +1256,7 @@ create_custom_partitions_freespace() {
     fi
     
     # Format boot and root
-    if [ "$BOOT_MODE" = "EFI" ]; then
-        mkfs.fat -F32 "$BOOT_DEV"
-    else
-        mkfs.ext4 "$BOOT_DEV"
-    fi
+    mkfs.fat -F32 "$BOOT_DEV"
     mkfs.ext4 "$ROOT_DEV"
     
     echo "$BOOT_DEV -> $BOOT_MOUNTPOINT" >> /tmp/asiraos/mounts
