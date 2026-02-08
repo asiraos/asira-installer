@@ -36,19 +36,19 @@ main_menu() {
     echo ""
     
     CHOICE=$(gum choose --cursor-prefix "> " --selected-prefix "* " \
-        "Guided Installation" \
-        "Expert Mode" \
-        "Configure Text Size" \
+        "Quick Installation" \
+        "Advanced Installation" \
+        "Font Scaling" \
         "Exit")
     
     case $CHOICE in
-        "Guided Installation")
+        "Quick Installation")
             basic_setup
             ;;
-        "Expert Mode")
+        "Advanced Installation")
             advanced_setup
             ;;
-        "Configure Text Size")
+        "Font Scaling")
             configure_text_size
             ;;
         "Exit")

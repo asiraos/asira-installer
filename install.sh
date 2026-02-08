@@ -7,7 +7,7 @@
 
 # AsiraOS Installer - Main Script
 set -e
-sudo pacman -Sy
+sudo pacman -Sy --noconfirm archlinux-keyring >/dev/null 2>&1
 
 # Counter for quit attempts
 QUIT_ATTEMPTS=0
