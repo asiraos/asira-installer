@@ -486,7 +486,6 @@ perform_installation() {
     else
         gum style --foreground 196 "Error: lib/asiraos.png not found"
     fi
-    cp lib/asiraos.png /mnt/etc/grub.d/
     # Install additional packages if selected
     if [ -f "/tmp/asiraos/packages" ]; then
         PACKAGES=$(cat /tmp/asiraos/packages | tr '\n' ' ')

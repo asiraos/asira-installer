@@ -19,6 +19,21 @@ get_free_space() {
     parted "$disk" unit GB print free 2>/dev/null | grep "Free Space" | tail -1 | awk '{print $1 " " $3}'
 }
 
+# Get the highest existing partition number on a disk (0 if none)
+get_last_partition_number() {
+    local disk=$1
+    local disk_name
+    disk_name=$(basename "$disk")
+    lsblk -ln -o NAME "$disk" | awk -v d="$disk_name" '
+        NR>1 {
+            n=$1
+            sub("^"d, "", n)
+            sub("^p", "", n)
+            if (n ~ /^[0-9]+$/ && n+0 > max) max = n+0
+        }
+        END { print max+0 }
+    '
+}
 # Disk Selection
 disk_selection() {
     show_banner
@@ -227,19 +242,23 @@ set_mountpoints() {
     echo -e "${GREEN}Select partition or free space:${NC}"
     SELECTED_OPTION=$(gum choose --cursor-prefix "> " --selected-prefix "* " "${PARTITION_OPTIONS[@]}")
     PARTITION=$(echo "$SELECTED_OPTION" | awk '{print $1}' | tr -d '│├└─')
-    
 
+    # Handle free space selection
+    if [ "$PARTITION" = "FREE_SPACE" ]; then
+        create_partition_in_free_space "$disk"
+        return
+    fi
 
-# Normalize partition name (remove /dev/ if already present)
-PARTITION="${PARTITION#/dev/}"
+    # Normalize partition name (remove /dev/ if already present)
+    PARTITION="${PARTITION#/dev/}"
 
-# Verify partition exists
-if [ ! -b "/dev/$PARTITION" ]; then
-    gum style --foreground 196 "Error: Partition /dev/$PARTITION not found"
-    gum input --placeholder "Press Enter to try again..."
-    set_mountpoints "$disk"
-    return
-fi
+    # Verify partition exists
+    if [ ! -b "/dev/$PARTITION" ]; then
+        gum style --foreground 196 "Error: Partition /dev/$PARTITION not found"
+        gum input --placeholder "Press Enter to try again..."
+        set_mountpoints "$disk"
+        return
+    fi
 
     
     # Select mountpoint
@@ -339,12 +358,8 @@ create_partition_in_free_space() {
     fi
     
     # Get next partition number
-    LAST_PART=$(parted "/dev/$disk" print 2>/dev/null | awk '/^ *[0-9]/ {last=$1} END {print last}')
-    if [ -z "$LAST_PART" ]; then
-        NEXT_PART=1
-    else
-        NEXT_PART=$((LAST_PART + 1))
-    fi
+    LAST_PART=$(get_last_partition_number "/dev/$disk")
+    NEXT_PART=$((LAST_PART + 1))
     
     # Create partition
     gum style --foreground 205 "Creating partition $NEXT_PART..."
@@ -495,170 +510,145 @@ auto_partition() {
     show_banner
     gum style --foreground 214 "Auto Partition"
     echo ""
-    
-    # Detect boot mode (EFI or BIOS)
-    if [ -d "/sys/firmware/efi" ]; then
+
+    # Detect boot mode
+    if [ -d /sys/firmware/efi ]; then
         BOOT_MODE="EFI"
-        gum style --foreground 46 "✓ EFI boot mode detected"
         BOOT_MOUNTPOINT="/boot/efi"
+        gum style --foreground 46 "✓ EFI boot mode detected"
     else
         BOOT_MODE="BIOS"
-        gum style --foreground 46 "✓ BIOS boot mode detected"
         BOOT_MOUNTPOINT="/boot"
+        gum style --foreground 46 "✓ BIOS boot mode detected"
     fi
     echo ""
-    
-    # Get real available disks and partitions
+
     gum style --foreground 46 "Detecting available storage..."
     ALL_OPTIONS=()
-    
-    # Add whole disks
-    while read -r disk_line; do
-        if [ -n "$disk_line" ]; then
-            disk_name=$(echo "$disk_line" | awk '{print $1}' | sed 's|/dev/||')
-            disk_size=$(echo "$disk_line" | awk '{print $2}')
-            ALL_OPTIONS+=("$disk_name ($disk_size) - Whole Disk")
-        fi
-    done < <(get_real_disks)
-    
-    # Add existing partitions
-    while read -r disk_line; do
-        if [ -n "$disk_line" ]; then
-            disk_path=$(echo "$disk_line" | awk '{print $1}')
-            disk_name=$(echo "$disk_path" | sed 's|/dev/||')
-            
-            while read -r part_line; do
-                if [ -n "$part_line" ]; then
-                    part_name=$(echo "$part_line" | awk '{print $1}' | sed 's|/dev/||')
-                    part_size=$(echo "$part_line" | awk '{print $2}')
-                    part_fstype=$(echo "$part_line" | awk '{print $3}')
-                    
-                    if [ "$part_fstype" = "" ]; then
-                        part_fstype="unformatted"
-                    fi
-                    
-                    ALL_OPTIONS+=(" └─ $part_name ($part_size, $part_fstype)")
-                fi
-            done < <(get_real_partitions "$disk_path")
-            
-            # Check for real free space
-            FREE_SPACE_INFO=$(get_free_space "$disk_path")
-            if [ -n "$FREE_SPACE_INFO" ]; then
-                FREE_SIZE=$(echo "$FREE_SPACE_INFO" | awk '{print $2}')
-                if [ "$FREE_SIZE" != "0GB" ] && [ "$FREE_SIZE" != "0.00GB" ]; then
-                    ALL_OPTIONS+=(" └─ ${disk_name}-freespace ($FREE_SIZE free)")
-                fi
+
+    # ---- DISK SCAN ----
+    while read -r disk size; do
+        [ -z "$disk" ] && continue
+        disk_name=$(basename "$disk")
+
+        ALL_OPTIONS+=("DISK|$disk_name|$size")
+
+        # free space (use real free-space detection)
+        FREE_SPACE_INFO=$(get_free_space "$disk")
+        if [ -n "$FREE_SPACE_INFO" ]; then
+            free_size=$(echo "$FREE_SPACE_INFO" | awk '{print $2}')
+            if [[ "$free_size" != "0GB" && "$free_size" != "0.00GB" ]]; then
+                ALL_OPTIONS+=("FREE|$disk_name|$free_size")
             fi
         fi
+
+        # partitions
+        while read -r p s f; do
+            [ -z "$p" ] && continue
+            ALL_OPTIONS+=("PART|$p|$s|${f:-unformatted}")
+        done < <(lsblk -ln -o NAME,SIZE,FSTYPE "$disk" | tail -n +2)
+
     done < <(get_real_disks)
-    
-    if [ ${#ALL_OPTIONS[@]} -eq 0 ]; then
+
+    [ ${#ALL_OPTIONS[@]} -eq 0 ] && {
         gum style --foreground 196 "No storage devices found"
-        gum input --placeholder "Press Enter to go back..."
-        disk_selection
+        gum input --placeholder "Press Enter..."
         return
-    fi
-    
-    # Let user select storage
-    gum style --foreground 46 "Select storage for installation:"
-    SELECTED_OPTION=$(gum choose --cursor-prefix "> " --selected-prefix "* " "${ALL_OPTIONS[@]}")
-    
-    # Parse the selected option
-    if [[ "$SELECTED_OPTION" =~ ^[[:space:]]*└─[[:space:]]*(.*) ]]; then
-        # It's a partition or free space (indented)
-        SELECTED_TARGET=$(echo "${BASH_REMATCH[1]}" | awk '{print $1}')
-    else
-        # It's a whole disk
-        SELECTED_TARGET=$(echo "$SELECTED_OPTION" | awk '{print $1}')
-    fi
-    
-    # Determine operation mode
-    if [[ "$SELECTED_TARGET" =~ -freespace$ ]]; then
-        # Free space mode
-        PARENT_DISK=$(echo "$SELECTED_TARGET" | sed 's/-freespace$//')
-        OPERATION_MODE="freespace"
-        TARGET_DISK="$PARENT_DISK"
-    elif [[ "$SELECTED_OPTION" =~ "Whole Disk" ]]; then
-        # Whole disk mode
-        OPERATION_MODE="wholedisk"
-        TARGET_DISK="$SELECTED_TARGET"
-    else
-        # Single partition mode
-        OPERATION_MODE="partition"
-        TARGET_PARTITION="$SELECTED_TARGET"
-        TARGET_DISK=$(echo "$SELECTED_TARGET" | sed 's/[0-9]*$//' | sed 's/p$//')
-    fi
-    
-    # Show selection info
+    }
+
+    # ---- UI ----
+    DISPLAY=()
+    for opt in "${ALL_OPTIONS[@]}"; do
+        IFS='|' read -r t n s f <<< "$opt"
+        case "$t" in
+            DISK) DISPLAY+=("$n ($s) - Whole Disk") ;;
+            FREE) DISPLAY+=(" └─ free space on $n ($s)") ;;
+            PART) DISPLAY+=(" └─ $n ($s, $f)") ;;
+        esac
+    done
+
+    SELECTED_UI=$(gum choose "${DISPLAY[@]}")
+
+    # ---- PARSE SELECTION SAFELY ----
+    for i in "${!DISPLAY[@]}"; do
+        if [ "${DISPLAY[$i]}" = "$SELECTED_UI" ]; then
+            IFS='|' read -r TYPE NAME SIZE FSTYPE <<< "${ALL_OPTIONS[$i]}"
+            break
+        fi
+    done
+
     echo ""
-    echo -e "${GREEN}Selected: $SELECTED_OPTION${NC}"
-    echo -e "${GREEN}Operation Mode: $OPERATION_MODE${NC}"
-    echo ""
-    
-    # Show appropriate warning
-    case $OPERATION_MODE in
-        "wholedisk")
-            gum style --foreground 196 "WARNING: This will erase ALL data on /dev/$TARGET_DISK"
-            ;;
-        "freespace")
-            gum style --foreground 205 "INFO: Will create partitions in free space on /dev/$TARGET_DISK"
-            ;;
-        "partition")
-            gum style --foreground 196 "WARNING: This will erase data on /dev/$TARGET_PARTITION"
-            ;;
+    gum style --foreground 46 "Selected: $TYPE → /dev/$NAME"
+
+    # ---- MODE ----
+    case "$TYPE" in
+        DISK) MODE="wholedisk"; TARGET_DISK="$NAME" ;;
+        FREE) MODE="freespace"; TARGET_DISK="$NAME" ;;
+        PART) MODE="partition"; TARGET_PART="/dev/$NAME" ;;
     esac
-    
-    CONFIRM=$(gum choose --cursor-prefix "> " --selected-prefix "* " "Yes" "No")
-    
-    if [ "$CONFIRM" = "No" ]; then
-        disk_selection
-        return
-    fi
-    
-    # Partition scheme selection
-    gum style --foreground 214 "Select partition scheme:"
-    PARTITION_SCHEME=$(gum choose --cursor-prefix "> " --selected-prefix "* " \
-        "Basic (Boot + Root only)" \
-        "Standard (Boot + Root + Home)" \
-        "Custom (Choose additional partitions)")
-    
-    # Execute partitioning based on mode and scheme
-    case $OPERATION_MODE in
-        "wholedisk")
-            case $PARTITION_SCHEME in
-                "Basic (Boot + Root only)")
-                    create_basic_partitions_wholedisk "$TARGET_DISK"
-                    ;;
-                "Standard (Boot + Root + Home)")
-                    create_standard_partitions_wholedisk "$TARGET_DISK"
-                    ;;
-                "Custom (Choose additional partitions)")
-                    create_custom_partitions_wholedisk "$TARGET_DISK"
-                    ;;
-            esac
+
+    gum style --foreground 196 "⚠ This may ERASE data"
+    CONFIRM=$(gum choose "Yes" "No")
+    [ "$CONFIRM" = "No" ] && return
+
+    # ---- PARTITION SCHEME ----
+    SCHEME=$(gum choose \
+        "Basic (Boot + Root)" \
+        "Standard (Boot + Root + Home)")
+
+    umount -R /mnt 2>/dev/null || true
+
+    case "$MODE" in
+        wholedisk)
+            wipefs -af "/dev/$TARGET_DISK" 2>/dev/null || true
+            if [ "$SCHEME" = "Standard (Boot + Root + Home)" ]; then
+                create_standard_partitions_wholedisk "$TARGET_DISK"
+            else
+                create_basic_partitions_wholedisk "$TARGET_DISK"
+            fi
+            return
             ;;
-        "freespace")
-            case $PARTITION_SCHEME in
-                "Basic (Boot + Root only)")
-                    create_basic_partitions_freespace "$TARGET_DISK"
-                    ;;
-                "Standard (Boot + Root + Home)")
-                    create_standard_partitions_freespace "$TARGET_DISK"
-                    ;;
-                "Custom (Choose additional partitions)")
-                    create_custom_partitions_freespace "$TARGET_DISK"
-                    ;;
-            esac
+        freespace)
+            if [ "$SCHEME" = "Standard (Boot + Root + Home)" ]; then
+                create_standard_partitions_freespace "$TARGET_DISK"
+            else
+                create_basic_partitions_freespace "$TARGET_DISK"
+            fi
+            return
             ;;
-        "partition")
-            gum style --foreground 205 "Using existing partition /dev/$TARGET_PARTITION as root"
+        partition)
+            rm -f /tmp/asiraos/mounts
             mkdir -p /tmp/asiraos
-            echo "/dev/$TARGET_PARTITION -> /" > /tmp/asiraos/mounts
-            gum style --foreground 46 "✓ Partition configured"
+
+            gum style --foreground 205 "Formatting $TARGET_PART as ext4..."
+            mkfs.ext4 -F "$TARGET_PART"
+            echo "$TARGET_PART -> /" >> /tmp/asiraos/mounts
+
+            if [ "$BOOT_MODE" = "EFI" ]; then
+                PARENT_DISK=$(lsblk -no PKNAME "$TARGET_PART" | head -1)
+                if [ -n "$PARENT_DISK" ]; then
+                    EFI_PART=$(lsblk -rno NAME,FSTYPE,PARTTYPE "/dev/$PARENT_DISK" | awk '
+                        $2 ~ /vfat|fat32/ {print $1; exit}
+                        $3 ~ /c12a7328-f81f-11d2-ba4b-00a0c93ec93b/ {print $1; exit}
+                    ')
+                    if [ -n "$EFI_PART" ]; then
+                        echo "/dev/$EFI_PART -> $BOOT_MOUNTPOINT" >> /tmp/asiraos/mounts
+                    else
+                        gum style --foreground 196 "EFI partition not found on /dev/$PARENT_DISK"
+                        gum input --placeholder "Press Enter to continue..."
+                        disk_selection
+                        return
+                    fi
+                fi
+            fi
+
             partition_complete
+            return
             ;;
     esac
 }
+
+
 
 # Create basic partitions on whole disk
 create_basic_partitions_wholedisk() {
@@ -982,14 +972,9 @@ create_basic_partitions_freespace() {
     echo -e "${GREEN}Found free space: $FREE_SIZE starting at $FREE_START${NC}"
     
     # Get next available partition numbers
-    LAST_PART=$(parted "/dev/$disk" print 2>/dev/null | awk '/^ *[0-9]/ {last=$1} END {print last}')
-    if [ -z "$LAST_PART" ]; then
-        BOOT_PART=1
-        ROOT_PART=2
-    else
-        BOOT_PART=$((LAST_PART + 1))
-        ROOT_PART=$((LAST_PART + 2))
-    fi
+    LAST_PART=$(get_last_partition_number "/dev/$disk")
+    BOOT_PART=$((LAST_PART + 1))
+    ROOT_PART=$((LAST_PART + 2))
     
     echo -e "${GREEN}Will create partitions: $BOOT_PART (boot) and $ROOT_PART (root)${NC}"
     
@@ -1094,16 +1079,10 @@ create_standard_partitions_freespace() {
     FREE_SIZE=$(echo "$FREE_SPACE_INFO" | awk '{print $2}')
     
     # Get next available partition numbers
-    LAST_PART=$(parted "/dev/$disk" print 2>/dev/null | awk '/^ *[0-9]/ {last=$1} END {print last}')
-    if [ -z "$LAST_PART" ]; then
-        BOOT_PART=1
-        ROOT_PART=2
-        HOME_PART=3
-    else
-        BOOT_PART=$((LAST_PART + 1))
-        ROOT_PART=$((LAST_PART + 2))
-        HOME_PART=$((LAST_PART + 3))
-    fi
+    LAST_PART=$(get_last_partition_number "/dev/$disk")
+    BOOT_PART=$((LAST_PART + 1))
+    ROOT_PART=$((LAST_PART + 2))
+    HOME_PART=$((LAST_PART + 3))
     
     # Create partitions
     if [ "$BOOT_MODE" = "EFI" ]; then
@@ -1182,12 +1161,8 @@ create_custom_partitions_freespace() {
     FREE_START=$(echo "$FREE_SPACE_INFO" | awk '{print $1}')
     
     # Get next available partition numbers
-    LAST_PART=$(parted "/dev/$disk" print 2>/dev/null | awk '/^ *[0-9]/ {last=$1} END {print last}')
-    if [ -z "$LAST_PART" ]; then
-        PART_NUM=1
-    else
-        PART_NUM=$((LAST_PART + 1))
-    fi
+    LAST_PART=$(get_last_partition_number "/dev/$disk")
+    PART_NUM=$((LAST_PART + 1))
     
     # Create boot partition
     if [ "$BOOT_MODE" = "EFI" ]; then
