@@ -440,6 +440,8 @@ perform_installation() {
         # BIOS system
         pacstrap /mnt grub os-prober --noconfirm --needed
         
+        echo -e "KEYMAP=us\nFONT=" > /mnt/etc/vconsole.conf
+
         # Get root partition device (remove partition number)
         ROOT_DEVICE=$(grep " / " /tmp/asiraos/mounts | cut -d' ' -f1 | sed 's/[0-9]*$//')
         arch-chroot /mnt grub-install "$ROOT_DEVICE"

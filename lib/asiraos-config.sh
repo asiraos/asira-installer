@@ -47,7 +47,7 @@ EOF
 #!/bin/bash
 
 # Use the logo from the installer lib directory
-LOGO_SOURCE="/etc/grub/themes/shared/asiraos.png"
+LOGO_SOURCE="/boot/grub/themes/shared/asiraos.png"
 GRUB_THEMES_DIR="/boot/grub/themes"
 
 if [[ ! -f "$LOGO_SOURCE" ]]; then
