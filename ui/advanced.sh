@@ -4,7 +4,7 @@
 # Advanced Setup Menu
 advanced_setup() {
     show_banner
-    echo -e "${RED}ADVANCED SETUP${NC}"
+    gum style --foreground 196 "ADVANCED SETUP"
     echo ""
     
     # Show preview of selections

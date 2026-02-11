@@ -10,7 +10,11 @@ network_detection() {
     if ping -c 1 8.8.8.8 &> /dev/null; then
         gum style --foreground 46 "Network connection detected"
         sleep 1
-        user_creation
+        if [ "$BASIC_MODE" = true ]; then
+            basic_step_14_disk
+        else
+            user_creation
+        fi
     else
         gum style --foreground 196 "No network connection found"
         gum style --foreground 214 "Opening network configuration..."
@@ -19,20 +23,28 @@ network_detection() {
         if ping -c 1 8.8.8.8 &> /dev/null; then
             gum style --foreground 46 "Network configured successfully"
             sleep 1
-            user_creation
+            if [ "$BASIC_MODE" = true ]; then
+                basic_step_14_disk
+            else
+                user_creation
+            fi
         else
             gum style --foreground 196 "Network still not available"
             
             CHOICE=$(gum choose --cursor-prefix "> " --selected-prefix "* " \
                 "Try Again" \
-                "Go Back to Previous Menu")
+                "← Back")
             
             case $CHOICE in
                 "Try Again")
                     network_detection
                     ;;
-                "Go Back to Previous Menu")
-                    main_menu
+                "← Back")
+                    if [ "$BASIC_MODE" = true ]; then
+                        basic_step_12_kernel
+                    else
+                        main_menu
+                    fi
                     ;;
             esac
         fi

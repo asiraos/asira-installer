@@ -30,6 +30,7 @@ trap '' TERM QUIT TSTP
 
 # Source all modules
 source ./lib/colors.sh
+source ./lib/ui.sh
 source ./lib/banner.sh
 source ./ui/network.sh
 source ./ui/user.sh
@@ -53,11 +54,14 @@ mkdir -p /tmp/asiraos
 chmod 755 /tmp/asiraos
 
 # Check if gum is installed
-if ! command -v gum &> /dev/null; then
+if ! type -P gum &> /dev/null; then
     echo -e "${RED}Error: gum is required but not installed.${NC}"
     echo "Please install gum first: https://github.com/charmbracelet/gum"
     exit 1
 fi
+
+# Enable centered UI defaults for gum commands.
+ui_setup_centered_gum
 
 # Start the installer in a loop
 while true; do

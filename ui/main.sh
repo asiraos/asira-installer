@@ -32,7 +32,7 @@ configure_text_size() {
 main_menu() {
     show_banner
     
-    echo -e "${YELLOW}Choose your installation method:${NC}"
+    gum style --foreground 214 "Choose your installation method:"
     echo ""
     
     CHOICE=$(gum choose --cursor-prefix "> " --selected-prefix "* " \
@@ -52,7 +52,7 @@ main_menu() {
             configure_text_size
             ;;
         "Exit")
-            echo -e "${GREEN}Thank you for using AsiraOS Installer!${NC}"
+            gum style --foreground 46 "Thank you for using AsiraOS Installer!"
             exit 0
             ;;
     esac

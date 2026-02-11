@@ -34,33 +34,108 @@ locale_selection() {
         sleep 1
     fi
     
-    advanced_setup
+    if [ "$BASIC_MODE" = true ]; then
+        source ./ui/basic.sh
+        basic_step_3_timezone
+    else
+        advanced_setup
+    fi
 }
 
 # Swap Configuration
+get_recommended_swap_gb() {
+    local ram_kb ram_gb rec_gb root_part root_bytes root_gb max_gb
+    ram_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    ram_gb=$(( (ram_kb + 1024*1024 - 1) / (1024*1024) ))
+    [ "$ram_gb" -lt 1 ] && ram_gb=1
+
+    if [ "$ram_gb" -le 2 ]; then
+        rec_gb=$((ram_gb * 2))
+    elif [ "$ram_gb" -le 8 ]; then
+        rec_gb=$ram_gb
+    elif [ "$ram_gb" -le 64 ]; then
+        rec_gb=$(( (ram_gb + 1) / 2 ))
+    else
+        rec_gb=8
+    fi
+
+    max_gb=64
+    if [ -f /tmp/asiraos/mounts ]; then
+        root_part=$(grep " -> /$" /tmp/asiraos/mounts | awk '{print $1}' | head -1)
+        if [ -n "$root_part" ] && [ -b "$root_part" ]; then
+            root_bytes=$(lsblk -bno SIZE "$root_part" 2>/dev/null | head -1)
+            root_gb=$(( root_bytes / 1024 / 1024 / 1024 ))
+            if [ "$root_gb" -gt 0 ]; then
+                max_gb=$(( root_gb / 3 ))
+            fi
+        fi
+    fi
+    [ "$max_gb" -lt 1 ] && max_gb=1
+
+    if [ "$rec_gb" -gt "$max_gb" ]; then
+        rec_gb=$max_gb
+    fi
+    [ "$rec_gb" -lt 1 ] && rec_gb=1
+    echo "$rec_gb"
+}
+
+format_swap_config() {
+    local cfg="$1"
+    if [ "$cfg" = "none" ] || [ -z "$cfg" ]; then
+        echo "Disabled"
+    elif [[ "$cfg" == swapfile:* ]]; then
+        echo "Swap File (${cfg#swapfile:}G)"
+    else
+        echo "$cfg"
+    fi
+}
+
 swap_config() {
+    local current_swap raw_choice rec_swap custom_swap
     show_banner
     gum style --foreground 212 "Swap Configuration"
     echo ""
     
     if [ -f "/tmp/asiraos/swap" ]; then
-        gum style --foreground 46 "Current swap: $(cat /tmp/asiraos/swap)"
+        current_swap=$(cat /tmp/asiraos/swap)
+        gum style --foreground 46 "Current swap: $(format_swap_config "$current_swap")"
         echo ""
     fi
-    
-    SWAP_CHOICE=$(gum choose --cursor-prefix "> " --selected-prefix "* " \
-        "Enable Swap (4GB)" \
-        "Enable Swap (8GB)" \
+
+    rec_swap=$(get_recommended_swap_gb)
+    raw_choice=$(gum choose --cursor-prefix "> " --selected-prefix "* " \
+        "Auto (Recommended) - ${rec_swap}GB" \
+        "Custom Swap File Size (GB)" \
         "Disable Swap")
-    
-    echo "$SWAP_CHOICE" > /tmp/asiraos/swap
-    gum style --foreground 46 "Swap configuration: $SWAP_CHOICE"
+
+    case "$raw_choice" in
+        "Auto (Recommended) - ${rec_swap}GB")
+            echo "swapfile:${rec_swap}" > /tmp/asiraos/swap
+            gum style --foreground 46 "Swap configuration: Swap File (${rec_swap}G)"
+            ;;
+        "Custom Swap File Size (GB)")
+            custom_swap=$(gum input --placeholder "Enter swap size in GB (e.g., 8)")
+            if ! [[ "$custom_swap" =~ ^[0-9]+$ ]] || [ "$custom_swap" -lt 1 ]; then
+                gum style --foreground 196 "Invalid swap size"
+                gum input --placeholder "Press Enter to try again..."
+                swap_config
+                return
+            fi
+            echo "swapfile:${custom_swap}" > /tmp/asiraos/swap
+            gum style --foreground 46 "Swap configuration: Swap File (${custom_swap}G)"
+            ;;
+        "Disable Swap")
+            echo "none" > /tmp/asiraos/swap
+            gum style --foreground 46 "Swap configuration: Disabled"
+            ;;
+    esac
+
     sleep 1
     
     # Handle basic mode progression
     if [ "$BASIC_MODE" = true ]; then
         source ./ui/basic.sh
-        basic_step_6_bootloader
+        basic_step_11_bootloader
     else
         advanced_setup
     fi
@@ -90,7 +165,7 @@ bootloader_selection() {
     # Handle basic mode progression
     if [ "$BASIC_MODE" = true ]; then
         source ./ui/basic.sh
-        basic_step_7_kernel
+        basic_step_12_kernel
     else
         advanced_setup
     fi
@@ -120,7 +195,7 @@ kernel_selection() {
     # Handle basic mode progression - NEVER go to advanced_setup
     if [ "$BASIC_MODE" = true ]; then
         source ./ui/basic.sh
-        basic_step_8_user
+        basic_step_13_network
     else
         advanced_setup
     fi
@@ -148,7 +223,7 @@ hostname_selection() {
     # Handle basic mode progression
     if [ "$BASIC_MODE" = true ]; then
         source ./ui/basic.sh
-        basic_step_10_desktop
+        basic_step_10_swap
     else
         advanced_setup
     fi
@@ -178,7 +253,7 @@ desktop_selection() {
     # Handle basic mode progression - NEVER go to advanced_setup
     if [ "$BASIC_MODE" = true ]; then
         source ./ui/basic.sh
-        basic_step_11_drivers
+        basic_step_6_drivers
     else
         advanced_setup
     fi
@@ -275,7 +350,7 @@ mirror_selection() {
     # Handle basic mode progression
     if [ "$BASIC_MODE" = true ]; then
         source ./ui/basic.sh
-        basic_step_5_swap
+        basic_step_5_desktop
     else
         advanced_setup
     fi
@@ -323,7 +398,7 @@ timezone_selection() {
     # Handle basic mode progression
     if [ "$BASIC_MODE" = true ]; then
         source ./ui/basic.sh
-        basic_install
+        basic_step_4_mirror
     else
         advanced_setup
     fi
@@ -340,14 +415,14 @@ install_system() {
     
     CONFIRM=$(gum choose --cursor-prefix "> " --selected-prefix "* " \
         "🚀 Start Installation" \
-        "Go Back to Configuration")
+        "← Back")
     
     if [ "$CONFIRM" = "🚀 Start Installation" ]; then
         perform_installation
     else
         if [ "$BASIC_MODE" = true ]; then
             source ./ui/basic.sh
-            basic_setup
+            basic_step_15_install
         else
             advanced_setup
         fi
@@ -365,6 +440,7 @@ perform_installation() {
     HOSTNAME=$(cat /tmp/asiraos/hostname 2>/dev/null || echo "asiraos")
     DESKTOP=$(cat /tmp/asiraos/desktop 2>/dev/null || echo "None (CLI only)")
     TIMEZONE=$(cat /tmp/asiraos/timezone 2>/dev/null || echo "UTC")
+    KEYMAP=$(cat /tmp/asiraos/keymap 2>/dev/null || echo "us")
     LOCALE=$(cat /tmp/asiraos/locale 2>/dev/null || echo "en_US.UTF-8")
     MIRROR=$(cat /tmp/asiraos/mirror 2>/dev/null)
     
@@ -390,8 +466,8 @@ perform_installation() {
         PARTITION=$(echo "$line" | cut -d' ' -f1)
         MOUNTPOINT=$(echo "$line" | cut -d' ' -f3)
         
-        # Skip root partition (already mounted) and swap
-        if [ "$MOUNTPOINT" = "/" ] || [ "$MOUNTPOINT" = "swap" ]; then
+        # Skip root partition (already mounted)
+        if [ "$MOUNTPOINT" = "/" ]; then
             continue
         fi
         
@@ -405,13 +481,6 @@ perform_installation() {
             mount "$PARTITION" "/mnt$MOUNTPOINT"
         fi
     done < /tmp/asiraos/mounts
-    
-    # Enable swap if configured
-    SWAP_PARTITION=$(grep " -> swap$" /tmp/asiraos/mounts | cut -d' ' -f1 | head -1)
-    if [ -n "$SWAP_PARTITION" ]; then
-        gum style --foreground 46 "Enabling swap: $SWAP_PARTITION"
-        swapon "$SWAP_PARTITION"
-    fi
     
     # Step 1: Install base packages
     gum style --foreground 205 "Step 1/5: Installing base packages..."
@@ -440,7 +509,7 @@ perform_installation() {
         # BIOS system
         pacstrap /mnt grub os-prober --noconfirm --needed
         
-        echo -e "KEYMAP=us\nFONT=" > /mnt/etc/vconsole.conf
+        echo -e "KEYMAP=$KEYMAP\nFONT=" > /mnt/etc/vconsole.conf
 
         # Get root partition device (remove partition number)
         ROOT_DEVICE=$(grep " / " /tmp/asiraos/mounts | cut -d' ' -f1 | sed 's/[0-9]*$//')
@@ -490,9 +559,26 @@ perform_installation() {
     fi
     # Install additional packages if selected
     if [ -f "/tmp/asiraos/packages" ]; then
-        PACKAGES=$(cat /tmp/asiraos/packages | tr '\n' ' ')
-        if [ -n "$PACKAGES" ]; then
-            pacstrap /mnt $PACKAGES --noconfirm --needed
+        mapfile -t PACKAGE_LIST < <(sort -u /tmp/asiraos/packages | sed '/^\s*$/d')
+        if [ "${#PACKAGE_LIST[@]}" -gt 0 ]; then
+            gum style --foreground 205 "Installing selected additional packages..."
+            pacstrap /mnt "${PACKAGE_LIST[@]}" --noconfirm --needed
+        fi
+    fi
+
+    # Configure swapfile (no swap partitions in installer flow).
+    SWAP_CONFIG=$(cat /tmp/asiraos/swap 2>/dev/null || echo "none")
+    if [[ "$SWAP_CONFIG" == swapfile:* ]]; then
+        SWAP_SIZE_GB="${SWAP_CONFIG#swapfile:}"
+        if [[ "$SWAP_SIZE_GB" =~ ^[0-9]+$ ]] && [ "$SWAP_SIZE_GB" -gt 0 ]; then
+            gum style --foreground 205 "Configuring swap file (${SWAP_SIZE_GB}G)..."
+            if ! fallocate -l "${SWAP_SIZE_GB}G" /mnt/swapfile 2>/dev/null; then
+                dd if=/dev/zero of=/mnt/swapfile bs=1G count="$SWAP_SIZE_GB" status=none
+            fi
+            chmod 600 /mnt/swapfile
+            mkswap /mnt/swapfile >/dev/null
+            grep -q "^/swapfile " /mnt/etc/fstab 2>/dev/null || \
+                echo "/swapfile none swap defaults 0 0" >> /mnt/etc/fstab
         fi
     fi
     
@@ -516,6 +602,9 @@ sed -i 's/#$LOCALE/$LOCALE/g' /etc/locale.gen
 locale-gen
 echo "LANG=$LOCALE" > /etc/locale.conf
 export LANG=$LOCALE
+
+# Setup keyboard layout
+echo -e "KEYMAP=$KEYMAP\nFONT=" > /etc/vconsole.conf
 
 # Setup timezone
 ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime

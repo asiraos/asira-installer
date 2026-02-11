@@ -26,7 +26,7 @@ driver_selection() {
     else
         gum style --foreground 46 "✓ Selected drivers saved"
         echo ""
-        echo "Selected drivers:"
+        gum style --foreground 46 "Selected drivers:"
         echo "$DRIVERS" | while read -r driver; do
             if [ -n "$driver" ]; then
                 gum style --foreground 46 "  • $driver"
@@ -38,7 +38,7 @@ driver_selection() {
     
     # Continue to next step based on mode
     if [ "$BASIC_MODE" = true ]; then
-        basic_step_12_packages
+        basic_step_7_packages
     else
         advanced_menu
     fi

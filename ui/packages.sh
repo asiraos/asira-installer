@@ -10,7 +10,9 @@ package_selection() {
     # Show currently selected packages (unique only)
     if [ -f "/tmp/asiraos/packages" ]; then
         gum style --foreground 212 "Selected packages:"
-        sort /tmp/asiraos/packages | uniq | tr '\n' ' '
+        while IFS= read -r pkg; do
+            [ -n "$pkg" ] && gum style --foreground 46 "$pkg"
+        done < <(sort /tmp/asiraos/packages | uniq)
         echo ""
         echo ""
     fi
@@ -19,7 +21,7 @@ package_selection() {
         "Search and Add Package" \
         "Clear All Packages" \
         "🚀 Continue to Next Step" \
-        "Go Back to Previous Menu")
+        "← Back")
     
     case $CHOICE in
         "Search and Add Package")
@@ -33,14 +35,14 @@ package_selection() {
             ;;
         "🚀 Continue to Next Step")
             if [ "$BASIC_MODE" = true ]; then
-                basic_step_13_timezone
+                basic_step_8_user
             else
                 advanced_setup
             fi
             ;;
-        "Go Back to Previous Menu")
+        "← Back")
             if [ "$BASIC_MODE" = true ]; then
-                basic_step_12_packages
+                basic_step_7_packages
             else
                 advanced_setup
             fi
