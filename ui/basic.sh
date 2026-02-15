@@ -9,7 +9,6 @@ basic_setup() {
 basic_has_saved_config() {
     [ -n "${USERNAME:-}" ] || [ -n "${PASSWORD:-}" ] || \
     [ -f "/tmp/asiraos/username" ] || [ -f "/tmp/asiraos/password" ] || \
-    [ -f "/tmp/asiraos/keymap" ] || [ -f "/tmp/asiraos/locale" ] || \
     [ -f "/tmp/asiraos/timezone" ] || [ -f "/tmp/asiraos/mirror" ] || \
     [ -f "/tmp/asiraos/desktop" ] || [ -f "/tmp/asiraos/drivers" ] || \
     [ -f "/tmp/asiraos/packages" ] || [ -f "/tmp/asiraos/hostname" ] || \
@@ -210,7 +209,7 @@ basic_ask_continue_or_change() {
 
 # Step 1: Keyboard Layout
 basic_step_1_keyboard() {
-    local selected_option selected_keymap current_keymap current_locale selected_locale_option selected_locale
+    local selected_option selected_keymap selected_locale current_keymap current_locale
     show_banner
     gum style --foreground 212 "Step 1/14: Language & Keyboard"
 
@@ -225,39 +224,69 @@ basic_step_1_keyboard() {
     fi
 
     selected_option=$(gum choose \
-        "English (US) - us" \
-        "English (UK) - uk" \
-        "German (DE) - de" \
-        "French (FR) - fr" \
-        "Spanish (ES) - es" \
-        "Italian (IT) - it" \
-        "Russian (RU) - ru" \
-        "Japanese (JP) - jp106" \
-        "Portuguese (BR) - br-abnt2")
+        "English (US)" \
+        "English (UK)" \
+        "German (Germany)" \
+        "French (France)" \
+        "Spanish (Spain)" \
+        "Italian (Italy)" \
+        "Portuguese (Brazil)" \
+        "Russian (Russia)" \
+        "Japanese (Japan)" \
+        "Chinese (China)")
 
-    if [ -n "$selected_option" ]; then
-        selected_keymap=$(echo "$selected_option" | sed 's/.* - //')
+    case "$selected_option" in
+        "English (US)")
+            selected_keymap="us"
+            selected_locale="en_US.UTF-8"
+            ;;
+        "English (UK)")
+            selected_keymap="uk"
+            selected_locale="en_GB.UTF-8"
+            ;;
+        "German (Germany)")
+            selected_keymap="de"
+            selected_locale="de_DE.UTF-8"
+            ;;
+        "French (France)")
+            selected_keymap="fr"
+            selected_locale="fr_FR.UTF-8"
+            ;;
+        "Spanish (Spain)")
+            selected_keymap="es"
+            selected_locale="es_ES.UTF-8"
+            ;;
+        "Italian (Italy)")
+            selected_keymap="it"
+            selected_locale="it_IT.UTF-8"
+            ;;
+        "Portuguese (Brazil)")
+            selected_keymap="br-abnt2"
+            selected_locale="pt_BR.UTF-8"
+            ;;
+        "Russian (Russia)")
+            selected_keymap="ru"
+            selected_locale="ru_RU.UTF-8"
+            ;;
+        "Japanese (Japan)")
+            selected_keymap="jp106"
+            selected_locale="ja_JP.UTF-8"
+            ;;
+        "Chinese (China)")
+            selected_keymap="us"
+            selected_locale="zh_CN.UTF-8"
+            ;;
+        *)
+            selected_keymap=""
+            selected_locale=""
+            ;;
+    esac
+
+    if [ -n "$selected_keymap" ] && [ -n "$selected_locale" ]; then
         echo "$selected_keymap" > /tmp/asiraos/keymap
-        loadkeys "$selected_keymap" >/dev/null 2>&1 || true
-        gum style --foreground 46 "Keyboard layout set to: $selected_option"
-    fi
-
-    selected_locale_option=$(gum choose \
-        "English (US) - en_US.UTF-8" \
-        "English (UK) - en_GB.UTF-8" \
-        "German (Germany) - de_DE.UTF-8" \
-        "French (France) - fr_FR.UTF-8" \
-        "Spanish (Spain) - es_ES.UTF-8" \
-        "Italian (Italy) - it_IT.UTF-8" \
-        "Portuguese (Brazil) - pt_BR.UTF-8" \
-        "Russian (Russia) - ru_RU.UTF-8" \
-        "Japanese (Japan) - ja_JP.UTF-8" \
-        "Chinese (China) - zh_CN.UTF-8")
-
-    if [ -n "$selected_locale_option" ]; then
-        selected_locale=$(echo "$selected_locale_option" | sed 's/.* - //')
         echo "$selected_locale" > /tmp/asiraos/locale
-        gum style --foreground 46 "Locale set to: $selected_locale_option"
+        loadkeys "$selected_keymap" >/dev/null 2>&1 || true
+        gum style --foreground 46 "Language set: $selected_option (keymap: $selected_keymap, locale: $selected_locale)"
     fi
 
     basic_step_3_timezone

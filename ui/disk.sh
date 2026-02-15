@@ -2,42 +2,62 @@
 
 # Get real disk and partition information
 get_real_disks() {
-    lsblk -dpno NAME,SIZE,TYPE | grep disk | while read -r name size type; do
-        echo "$name $size"
-    done
+    # Prefer parted machine output for reliable whole-disk detection.
+    local found=0
+    while IFS=: read -r dev size _; do
+        [[ "$dev" != /dev/* ]] && continue
+        [[ "$dev" =~ /dev/(loop|ram|zram) ]] && continue
+        [ -b "$dev" ] || continue
+        echo "$dev $size"
+        found=1
+    done < <(parted -m -s -l 2>/dev/null | awk -F: '/^\/dev\// {print $1 ":" $2}')
+
+    # Fallback for environments where parted list is unavailable.
+    if [ "$found" -eq 0 ]; then
+        lsblk -dpno NAME,SIZE,TYPE 2>/dev/null | awk '$3=="disk"{print $1" "$2}'
+    fi
 }
 
 get_real_partitions() {
     local disk=$1
-    lsblk -pno NAME,SIZE,FSTYPE,MOUNTPOINT "$disk" | grep -v "^$disk" | while read -r name size fstype mount; do
+    lsblk -pnro NAME,SIZE,FSTYPE,MOUNTPOINT "$disk" 2>/dev/null | awk -v d="$disk" '$1 != d {print}' | while read -r name size fstype mount; do
         echo "$name $size $fstype $mount"
     done
 }
 
-get_free_space() {
+get_free_regions() {
     local disk=$1
-    local parted_cmd="parted"
-    if command -v sudo >/dev/null 2>&1; then
-        parted_cmd="sudo parted"
-    fi
-    $parted_cmd "$disk" unit GB print free 2>/dev/null | awk '
-        /Free Space/ {
-            start=$1
-            size=$3
-            n=size
-            gsub(/[^0-9.]/, "", n)
-            if (n+0 > max) {
-                max=n+0
-                best_start=start
-                best_size=size
-            }
-        }
-        END {
-            if (max > 0) {
-                print best_start " " best_size
+    parted -m -s "$disk" unit MiB print free 2>/dev/null | awk -F: '
+        function n(v) { gsub(/[^0-9.]/, "", v); return v + 0 }
+        $0 ~ /:free;$/ || $5 ~ /free/ {
+            start=n($2); stop=n($3); size=n($4)
+            if (stop > start && size > 1) {
+                printf "%.2f %.2f %.2f\n", start, stop, size
             }
         }
     '
+}
+
+get_free_space() {
+    local disk=$1
+    # Keep compatibility: return largest region as "start size" with MiB units.
+    get_free_regions "$disk" | awk '
+        {
+            if ($3 + 0 > max) {
+                max=$3 + 0
+                s=$1
+                z=$3
+            }
+        }
+        END {
+            if (max > 0) printf "%.2fMiB %.2fMiB\n", s, z
+        }
+    '
+}
+
+humanize_mib() {
+    local mib="$1"
+    awk -v m="$mib" 'BEGIN { if (m >= 1024) printf "%.2fGiB", (m/1024); else printf "%.0fMiB", m }'
 }
 
 # Get the highest existing partition number on a disk (0 if none)
@@ -339,7 +359,7 @@ create_partition_in_free_space() {
     FREE_START=$(echo "$FREE_SPACE_INFO" | awk '{print $1}')
     FREE_SIZE=$(echo "$FREE_SPACE_INFO" | awk '{print $2}')
     
-    if [ -z "$FREE_START" ] || [ "$FREE_SIZE" = "0GB" ]; then
+    if [ -z "$FREE_START" ] || [ -z "$FREE_SIZE" ]; then
         gum style --foreground 196 "No free space available"
         gum input --placeholder "Press Enter to continue..."
         set_mountpoints "$disk"
@@ -356,17 +376,33 @@ create_partition_in_free_space() {
         return
     fi
     
+    FREE_START_MIB=$(echo "$FREE_START" | sed 's/[^0-9.]//g')
+    FREE_SIZE_MIB=$(echo "$FREE_SIZE" | sed 's/[^0-9.]//g')
+    FREE_END_MIB=$(awk -v s="$FREE_START_MIB" -v z="$FREE_SIZE_MIB" 'BEGIN {printf "%.2f", s+z}')
+
     # Calculate end position
     if [ "$PART_SIZE" = "all" ]; then
-        END_POS="100%"
+        END_POS="${FREE_END_MIB}MiB"
     elif [[ "$PART_SIZE" == *"%" ]]; then
-        END_POS="$PART_SIZE"
+        pct=$(echo "$PART_SIZE" | tr -d '%')
+        if ! [[ "$pct" =~ ^[0-9]+$ ]] || [ "$pct" -lt 1 ] || [ "$pct" -gt 100 ]; then
+            gum style --foreground 196 "Invalid percentage size"
+            gum input --placeholder "Press Enter to try again..."
+            create_partition_in_free_space "$disk"
+            return
+        fi
+        END_POS=$(awk -v s="$FREE_START_MIB" -v z="$FREE_SIZE_MIB" -v p="$pct" 'BEGIN {printf "%.2fMiB", s + (z * p / 100)}')
     else
-        # Convert to MB and calculate end
-        SIZE_MB=$(echo "$PART_SIZE" | sed 's/GB//' | awk '{print $1 * 1024}')
-        START_MB=$(echo "$FREE_START" | sed 's/GB//' | awk '{print $1 * 1024}')
-        END_MB=$((START_MB + SIZE_MB))
-        END_POS="${END_MB}MB"
+        SIZE_MIB=$(echo "$PART_SIZE" | sed -E 's/[Gg][Bb]?$//' | awk '{print $1 * 1024}')
+        END_POS=$(awk -v s="$FREE_START_MIB" -v z="$SIZE_MIB" 'BEGIN {printf "%.2fMiB", s + z}')
+    fi
+
+    END_POS_MIB=$(echo "$END_POS" | sed 's/[^0-9.]//g')
+    if awk "BEGIN {exit !($END_POS_MIB > $FREE_END_MIB)}"; then
+        gum style --foreground 196 "Requested size exceeds free space region"
+        gum input --placeholder "Press Enter to try again..."
+        create_partition_in_free_space "$disk"
+        return
     fi
     
     # Get next partition number
@@ -534,7 +570,7 @@ auto_partition() {
     gum style --foreground 46 "Detecting available storage..."
     ALL_OPTIONS=()
 
-    # ---- DISK SCAN ----
+    # ---- DISK SCAN (parted-backed) ----
     while read -r disk size; do
         [ -z "$disk" ] && continue
         [[ "$disk" != /dev/* ]] && disk="/dev/$disk"
@@ -543,16 +579,13 @@ auto_partition() {
 
         ALL_OPTIONS+=("DISK|$disk_name|$size")
 
-        # Largest free-space region for this disk (for auto partition choices).
-        FREE_SPACE_INFO=$(get_free_space "$disk")
-        if [ -n "$FREE_SPACE_INFO" ]; then
-            free_size=$(echo "$FREE_SPACE_INFO" | awk '{print $2}')
-            free_num=$(echo "$free_size" | sed 's/[^0-9.]//g')
-            [ -z "$free_num" ] && free_num=0
-            if awk "BEGIN {exit !($free_num > 0.01)}"; then
-                ALL_OPTIONS+=("FREE|$disk_name|$free_size")
+        # Add each meaningful free-space region (>= 512MiB).
+        while read -r free_start free_end free_size_mib; do
+            [ -z "$free_size_mib" ] && continue
+            if awk "BEGIN {exit !($free_size_mib >= 512)}"; then
+                ALL_OPTIONS+=("FREE|$disk_name|$free_size_mib|$free_start|$free_end")
             fi
-        fi
+        done < <(get_free_regions "$disk")
 
         # partitions
         while read -r p s f m; do
@@ -572,10 +605,10 @@ auto_partition() {
     # ---- UI ----
     DISPLAY=()
     for opt in "${ALL_OPTIONS[@]}"; do
-        IFS='|' read -r t n s f <<< "$opt"
+        IFS='|' read -r t n s f start end <<< "$opt"
         case "$t" in
             DISK) DISPLAY+=("$n ($s) - Whole Disk") ;;
-            FREE) DISPLAY+=(" └─ free space on $n ($s)") ;;
+            FREE) DISPLAY+=(" └─ free space on $n ($(humanize_mib "$s"), ${start}MiB-${end}MiB)") ;;
             PART) DISPLAY+=(" └─ $n ($s, $f)") ;;
         esac
     done
@@ -585,7 +618,7 @@ auto_partition() {
     # ---- PARSE SELECTION SAFELY ----
     for i in "${!DISPLAY[@]}"; do
         if [ "${DISPLAY[$i]}" = "$SELECTED_UI" ]; then
-            IFS='|' read -r TYPE NAME SIZE FSTYPE <<< "${ALL_OPTIONS[$i]}"
+            IFS='|' read -r TYPE NAME SIZE FSTYPE FREE_START_MIB FREE_END_MIB <<< "${ALL_OPTIONS[$i]}"
             break
         fi
     done
@@ -596,7 +629,12 @@ auto_partition() {
     # ---- MODE ----
     case "$TYPE" in
         DISK) MODE="wholedisk"; TARGET_DISK="$NAME" ;;
-        FREE) MODE="freespace"; TARGET_DISK="$NAME" ;;
+        FREE)
+            MODE="freespace"
+            TARGET_DISK="$NAME"
+            TARGET_FREE_START="$FREE_START_MIB"
+            TARGET_FREE_END="$FREE_END_MIB"
+            ;;
         PART) MODE="partition"; TARGET_PART="/dev/$NAME" ;;
     esac
 
@@ -623,9 +661,9 @@ auto_partition() {
             ;;
         freespace)
             if [ "$SCHEME" = "Standard (Boot + Root + Home)" ]; then
-                create_standard_partitions_freespace "$TARGET_DISK"
+                create_standard_partitions_freespace "$TARGET_DISK" "$TARGET_FREE_START" "$TARGET_FREE_END"
             else
-                create_basic_partitions_freespace "$TARGET_DISK"
+                create_basic_partitions_freespace "$TARGET_DISK" "$TARGET_FREE_START" "$TARGET_FREE_END"
             fi
             return
             ;;
@@ -936,6 +974,8 @@ create_custom_partitions_wholedisk() {
 # Create basic partitions in free space - FIXED VERSION
 create_basic_partitions_freespace() {
     local disk=$1
+    local selected_start_mib=$2
+    local selected_end_mib=$3
     
     echo -e "${CYAN}Creating basic partitions in free space on /dev/${disk}...${NC}"
     
@@ -944,25 +984,41 @@ create_basic_partitions_freespace() {
     mkdir -p /tmp/asiraos
     
     # Get real free space information
-    FREE_SPACE_INFO=$(get_free_space "/dev/$disk")
-    if [ -z "$FREE_SPACE_INFO" ]; then
+    if [ -n "$selected_start_mib" ] && [ -n "$selected_end_mib" ]; then
+        FREE_START_MIB="$selected_start_mib"
+        FREE_END_MIB="$selected_end_mib"
+    else
+        FREE_REGION=$(get_free_regions "/dev/$disk" | awk 'BEGIN{m=0} { if($3>m){m=$3; s=$1; e=$2} } END { if(m>0) print s" "e" "m }')
+        if [ -z "$FREE_REGION" ]; then
+            gum style --foreground 196 "ERROR: No free space found on /dev/$disk"
+            gum input --placeholder "Press Enter to continue..."
+            disk_selection
+            return
+        fi
+        FREE_START_MIB=$(echo "$FREE_REGION" | awk '{print $1}')
+        FREE_END_MIB=$(echo "$FREE_REGION" | awk '{print $2}')
+    fi
+
+    FREE_SIZE_MIB=$(awk -v s="$FREE_START_MIB" -v e="$FREE_END_MIB" 'BEGIN {printf "%.2f", (e-s)}')
+    if awk "BEGIN {exit !($FREE_SIZE_MIB <= 0)}"; then
         gum style --foreground 196 "ERROR: No free space found on /dev/$disk"
         gum input --placeholder "Press Enter to continue..."
         disk_selection
         return
     fi
-    
-    FREE_START=$(echo "$FREE_SPACE_INFO" | awk '{print $1}')
-    FREE_SIZE=$(echo "$FREE_SPACE_INFO" | awk '{print $2}')
-    
-    if [ "$FREE_SIZE" = "0GB" ] || [ "$FREE_SIZE" = "0.00GB" ]; then
-        gum style --foreground 196 "ERROR: No usable free space available"
+
+    REQUIRED_MIB=2048
+    if [ "$BOOT_MODE" = "EFI" ]; then
+        REQUIRED_MIB=3072
+    fi
+    if awk "BEGIN {exit !($FREE_SIZE_MIB < $REQUIRED_MIB)}"; then
+        gum style --foreground 196 "ERROR: Not enough free space available in selected region"
         gum input --placeholder "Press Enter to continue..."
         disk_selection
         return
     fi
     
-    echo -e "${GREEN}Found free space: $FREE_SIZE starting at $FREE_START${NC}"
+    echo -e "${GREEN}Found free space: $(humanize_mib "$FREE_SIZE_MIB") starting at ${FREE_START_MIB}MiB${NC}"
     
     # Get next available partition numbers
     LAST_PART=$(get_last_partition_number "/dev/$disk")
@@ -977,27 +1033,28 @@ create_basic_partitions_freespace() {
     
     # Create partitions based on boot mode
     if [ "$BOOT_MODE" = "EFI" ]; then
-        # Calculate boot partition end (1GB from start)
-        BOOT_SIZE_GB=1
-        BOOT_END=$(echo "$FREE_START" | sed 's/GB//' | awk -v size="$BOOT_SIZE_GB" '{printf "%.2fGB", $1 + size}')
+        BOOT_END=$(awk -v s="$FREE_START_MIB" 'BEGIN {printf "%.2fMiB", s + 1024}')
+        FREE_START="${FREE_START_MIB}MiB"
+        FREE_END="${FREE_END_MIB}MiB"
         
         echo -e "${CYAN}Creating EFI boot partition: $FREE_START to $BOOT_END${NC}"
         parted "/dev/$disk" mkpart primary fat32 "$FREE_START" "$BOOT_END" --script
+        parted "/dev/$disk" set "$BOOT_PART" esp on --script 2>/dev/null || true
         parted "/dev/$disk" set "$BOOT_PART" boot on --script
         
-        echo -e "${CYAN}Creating root partition: $BOOT_END to end of free space${NC}"
-        parted "/dev/$disk" mkpart primary ext4 "$BOOT_END" "100%" --script
+        echo -e "${CYAN}Creating root partition: $BOOT_END to $FREE_END${NC}"
+        parted "/dev/$disk" mkpart primary ext4 "$BOOT_END" "$FREE_END" --script
     else
-        # BIOS mode - 512MB boot partition
-        BOOT_SIZE_GB=0.5
-        BOOT_END=$(echo "$FREE_START" | sed 's/GB//' | awk -v size="$BOOT_SIZE_GB" '{printf "%.2fGB", $1 + size}')
+        BOOT_END=$(awk -v s="$FREE_START_MIB" 'BEGIN {printf "%.2fMiB", s + 512}')
+        FREE_START="${FREE_START_MIB}MiB"
+        FREE_END="${FREE_END_MIB}MiB"
         
         echo -e "${CYAN}Creating BIOS boot partition: $FREE_START to $BOOT_END${NC}"
         parted "/dev/$disk" mkpart primary ext4 "$FREE_START" "$BOOT_END" --script
         parted "/dev/$disk" set "$BOOT_PART" boot on --script
         
-        echo -e "${CYAN}Creating root partition: $BOOT_END to end of free space${NC}"
-        parted "/dev/$disk" mkpart primary ext4 "$BOOT_END" "100%" --script
+        echo -e "${CYAN}Creating root partition: $BOOT_END to $FREE_END${NC}"
+        parted "/dev/$disk" mkpart primary ext4 "$BOOT_END" "$FREE_END" --script
     fi
     
     # Wait for kernel to recognize new partitions
@@ -1053,6 +1110,8 @@ create_basic_partitions_freespace() {
 # Create standard partitions in free space - FIXED VERSION
 create_standard_partitions_freespace() {
     local disk=$1
+    local selected_start_mib=$2
+    local selected_end_mib=$3
     echo -e "${CYAN}Creating standard partitions in free space on /dev/${disk}...${NC}"
     
     # Clear existing mounts
@@ -1060,16 +1119,42 @@ create_standard_partitions_freespace() {
     mkdir -p /tmp/asiraos
     
     # Get real free space information
-    FREE_SPACE_INFO=$(get_free_space "/dev/$disk")
-    if [ -z "$FREE_SPACE_INFO" ]; then
+    if [ -n "$selected_start_mib" ] && [ -n "$selected_end_mib" ]; then
+        FREE_START_MIB="$selected_start_mib"
+        FREE_END_MIB="$selected_end_mib"
+    else
+        FREE_REGION=$(get_free_regions "/dev/$disk" | awk 'BEGIN{m=0} { if($3>m){m=$3; s=$1; e=$2} } END { if(m>0) print s" "e" "m }')
+        if [ -z "$FREE_REGION" ]; then
+            gum style --foreground 196 "ERROR: No free space found"
+            gum input --placeholder "Press Enter to continue..."
+            disk_selection
+            return
+        fi
+        FREE_START_MIB=$(echo "$FREE_REGION" | awk '{print $1}')
+        FREE_END_MIB=$(echo "$FREE_REGION" | awk '{print $2}')
+    fi
+
+    FREE_SIZE_MIB=$(awk -v s="$FREE_START_MIB" -v e="$FREE_END_MIB" 'BEGIN {printf "%.2f", (e-s)}')
+    BOOT_MIB=512
+    [ "$BOOT_MODE" = "EFI" ] && BOOT_MIB=1024
+    ROOT_MIB=30720
+    REQUIRED_TOTAL_MIB=$(awk -v b="$BOOT_MIB" -v r="$ROOT_MIB" 'BEGIN {print b + r + 1024}')
+    if awk "BEGIN {exit !($FREE_SIZE_MIB < $REQUIRED_TOTAL_MIB)}"; then
+        gum style --foreground 196 "ERROR: Selected free region is too small for Standard scheme"
+        gum input --placeholder "Press Enter to continue..."
+        disk_selection
+        return
+    fi
+
+    FREE_START="${FREE_START_MIB}MiB"
+    FREE_END="${FREE_END_MIB}MiB"
+
+    if [ -z "$FREE_START_MIB" ] || [ -z "$FREE_END_MIB" ]; then
         gum style --foreground 196 "ERROR: No free space found"
         gum input --placeholder "Press Enter to continue..."
         disk_selection
         return
     fi
-    
-    FREE_START=$(echo "$FREE_SPACE_INFO" | awk '{print $1}')
-    FREE_SIZE=$(echo "$FREE_SPACE_INFO" | awk '{print $2}')
     
     # Get next available partition numbers
     LAST_PART=$(get_last_partition_number "/dev/$disk")
@@ -1079,21 +1164,22 @@ create_standard_partitions_freespace() {
     
     # Create partitions
     if [ "$BOOT_MODE" = "EFI" ]; then
-        BOOT_END=$(echo "$FREE_START" | sed 's/GB//' | awk '{printf "%.2fGB", $1 + 1}')
-        ROOT_END=$(echo "$BOOT_END" | sed 's/GB//' | awk '{printf "%.2fGB", $1 + 30}')
+        BOOT_END=$(awk -v s="$FREE_START_MIB" 'BEGIN {printf "%.2fMiB", s + 1024}')
+        ROOT_END=$(awk -v s="$FREE_START_MIB" 'BEGIN {printf "%.2fMiB", s + 1024 + 30720}')
         
         parted "/dev/$disk" mkpart primary fat32 "$FREE_START" "$BOOT_END" --script
+        parted "/dev/$disk" set "$BOOT_PART" esp on --script 2>/dev/null || true
         parted "/dev/$disk" set "$BOOT_PART" boot on --script
         parted "/dev/$disk" mkpart primary ext4 "$BOOT_END" "$ROOT_END" --script
-        parted "/dev/$disk" mkpart primary ext4 "$ROOT_END" "100%" --script
+        parted "/dev/$disk" mkpart primary ext4 "$ROOT_END" "$FREE_END" --script
     else
-        BOOT_END=$(echo "$FREE_START" | sed 's/GB//' | awk '{printf "%.2fGB", $1 + 0.5}')
-        ROOT_END=$(echo "$BOOT_END" | sed 's/GB//' | awk '{printf "%.2fGB", $1 + 30}')
+        BOOT_END=$(awk -v s="$FREE_START_MIB" 'BEGIN {printf "%.2fMiB", s + 512}')
+        ROOT_END=$(awk -v s="$FREE_START_MIB" 'BEGIN {printf "%.2fMiB", s + 512 + 30720}')
         
         parted "/dev/$disk" mkpart primary ext4 "$FREE_START" "$BOOT_END" --script
         parted "/dev/$disk" set "$BOOT_PART" boot on --script
         parted "/dev/$disk" mkpart primary ext4 "$BOOT_END" "$ROOT_END" --script
-        parted "/dev/$disk" mkpart primary ext4 "$ROOT_END" "100%" --script
+        parted "/dev/$disk" mkpart primary ext4 "$ROOT_END" "$FREE_END" --script
     fi
     
     # Wait for kernel recognition
