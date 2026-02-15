@@ -404,6 +404,81 @@ timezone_selection() {
     fi
 }
 
+render_install_progress_screen() {
+    local group="$1"
+    local current="$2"
+    local total="$3"
+    local pkg="$4"
+    local status="$5"
+    local installed="$6"
+    local skipped="$7"
+    local failed="$8"
+    local status_color="$9"
+    local percent bar_width filled empty bar
+
+    [ "$total" -lt 1 ] && total=1
+    percent=$(( current * 100 / total ))
+    bar_width=34
+    filled=$(( percent * bar_width / 100 ))
+    empty=$(( bar_width - filled ))
+    bar="$(printf '%*s' "$filled" '' | tr ' ' '#')$(printf '%*s' "$empty" '' | tr ' ' '-')"
+
+    clear
+    gum style --foreground 212 "Installing AsiraOS"
+    gum style --foreground 205 "$group"
+    gum style --foreground 214 "[$bar] ${percent}% (${current}/${total})"
+    gum style --foreground "$status_color" "$status: $pkg"
+    gum style --foreground 46 "Installed: $installed | Skipped: $skipped | Failed: $failed"
+}
+
+install_packages_with_progress() {
+    local group="$1"
+    local strict="$2"
+    shift 2
+
+    local pkgs=("$@")
+    local total=0
+    local current=0
+    local installed=0
+    local skipped=0
+    local failed=0
+    local pkg
+
+    for pkg in "${pkgs[@]}"; do
+        [ -n "$pkg" ] && total=$((total + 1))
+    done
+
+    for pkg in "${pkgs[@]}"; do
+        [ -z "$pkg" ] && continue
+        current=$((current + 1))
+
+        if pacman --root /mnt --dbpath /mnt/var/lib/pacman -Qq "$pkg" >/dev/null 2>&1; then
+            skipped=$((skipped + 1))
+            render_install_progress_screen "$group" "$current" "$total" "$pkg" "Skipping" "$installed" "$skipped" "$failed" 226
+            continue
+        fi
+
+        render_install_progress_screen "$group" "$current" "$total" "$pkg" "Installing" "$installed" "$skipped" "$failed" 214
+
+        if pacstrap /mnt "$pkg" --noconfirm --needed >/dev/null 2>&1; then
+            installed=$((installed + 1))
+            render_install_progress_screen "$group" "$current" "$total" "$pkg" "Installed" "$installed" "$skipped" "$failed" 46
+        else
+            failed=$((failed + 1))
+            render_install_progress_screen "$group" "$current" "$total" "$pkg" "Failed" "$installed" "$skipped" "$failed" 196
+        fi
+    done
+
+    INSTALL_LAST_FAILED="$failed"
+    INSTALL_LAST_INSTALLED="$installed"
+    INSTALL_LAST_SKIPPED="$skipped"
+
+    if [ "$strict" = "true" ] && [ "$failed" -gt 0 ]; then
+        return 1
+    fi
+    return 0
+}
+
 # Install System
 install_system() {
     show_banner
@@ -438,6 +513,8 @@ perform_installation() {
     # Load configuration
     KERNEL=$(cat /tmp/asiraos/kernel 2>/dev/null || echo "linux")
     HOSTNAME=$(cat /tmp/asiraos/hostname 2>/dev/null || echo "asiraos")
+    USERNAME=${USERNAME:-$(cat /tmp/asiraos/username 2>/dev/null || echo "")}
+    PASSWORD=${PASSWORD:-$(cat /tmp/asiraos/password 2>/dev/null || echo "")}
     DESKTOP=$(cat /tmp/asiraos/desktop 2>/dev/null || echo "None (CLI only)")
     TIMEZONE=$(cat /tmp/asiraos/timezone 2>/dev/null || echo "UTC")
     KEYMAP=$(cat /tmp/asiraos/keymap 2>/dev/null || echo "us")
@@ -483,21 +560,33 @@ perform_installation() {
     done < /tmp/asiraos/mounts
     
     # Step 1: Install base packages
-    gum style --foreground 205 "Step 1/5: Installing base packages..."
-    pacstrap /mnt base base-devel $KERNEL linux-firmware --noconfirm --needed
+    BASE_PACKAGES=(base base-devel "$KERNEL" linux-firmware)
+    if ! install_packages_with_progress "Step 1/5: Base Packages" true "${BASE_PACKAGES[@]}"; then
+        gum style --foreground 196 "Failed to install one or more base packages."
+        gum input --placeholder "Press Enter to go back..."
+        return
+    fi
     
     # Step 2: Install dependencies and drivers
-    gum style --foreground 205 "Step 2/5: Installing dependencies and drivers..."
-    DRIVER_PACKAGES=$(get_driver_packages)
-    pacstrap /mnt networkmanager network-manager-applet wireless_tools bluez bluez-utils blueman git $DRIVER_PACKAGES --noconfirm --needed
+    DRIVER_PACKAGES_STR=$(get_driver_packages)
+    read -r -a DRIVER_PACKAGES_ARR <<< "$DRIVER_PACKAGES_STR"
+    DEP_PACKAGES=(networkmanager network-manager-applet wireless_tools bluez bluez-utils blueman git "${DRIVER_PACKAGES_ARR[@]}")
+    if ! install_packages_with_progress "Step 2/5: Dependencies & Drivers" true "${DEP_PACKAGES[@]}"; then
+        gum style --foreground 196 "Failed to install one or more dependency packages."
+        gum input --placeholder "Press Enter to go back..."
+        return
+    fi
     
     # Step 3: Bootloader installation
-    gum style --foreground 205 "Step 3/5: Installing bootloader..."
     
     # Check if system is EFI or BIOS
     if [ -d /sys/firmware/efi ]; then
         # EFI system
-        pacstrap /mnt grub efibootmgr os-prober --noconfirm --needed
+        if ! install_packages_with_progress "Step 3/5: Bootloader Packages" true grub efibootmgr os-prober; then
+            gum style --foreground 196 "Failed to install one or more bootloader packages."
+            gum input --placeholder "Press Enter to go back..."
+            return
+        fi
         
         # Check boot partition mount point
         if grep -q "/boot/efi" /tmp/asiraos/mounts; then
@@ -507,7 +596,11 @@ perform_installation() {
         fi
     else
         # BIOS system
-        pacstrap /mnt grub os-prober --noconfirm --needed
+        if ! install_packages_with_progress "Step 3/5: Bootloader Packages" true grub os-prober; then
+            gum style --foreground 196 "Failed to install one or more bootloader packages."
+            gum input --placeholder "Press Enter to go back..."
+            return
+        fi
         
         echo -e "KEYMAP=$KEYMAP\nFONT=" > /mnt/etc/vconsole.conf
 
@@ -561,8 +654,7 @@ perform_installation() {
     if [ -f "/tmp/asiraos/packages" ]; then
         mapfile -t PACKAGE_LIST < <(sort -u /tmp/asiraos/packages | sed '/^\s*$/d')
         if [ "${#PACKAGE_LIST[@]}" -gt 0 ]; then
-            gum style --foreground 205 "Installing selected additional packages..."
-            pacstrap /mnt "${PACKAGE_LIST[@]}" --noconfirm --needed
+            install_packages_with_progress "Additional Packages" false "${PACKAGE_LIST[@]}"
         fi
     fi
 

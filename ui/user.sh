@@ -32,6 +32,9 @@ user_creation() {
     fi
     
     gum style --foreground 46 "User created: $USERNAME"
+    mkdir -p /tmp/asiraos
+    echo "$USERNAME" > /tmp/asiraos/username
+    echo "$PASSWORD" > /tmp/asiraos/password
     sleep 1
     
     # Handle basic mode progression

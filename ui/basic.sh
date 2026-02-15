@@ -8,6 +8,7 @@ basic_setup() {
 
 basic_has_saved_config() {
     [ -n "${USERNAME:-}" ] || [ -n "${PASSWORD:-}" ] || \
+    [ -f "/tmp/asiraos/username" ] || [ -f "/tmp/asiraos/password" ] || \
     [ -f "/tmp/asiraos/keymap" ] || [ -f "/tmp/asiraos/locale" ] || \
     [ -f "/tmp/asiraos/timezone" ] || [ -f "/tmp/asiraos/mirror" ] || \
     [ -f "/tmp/asiraos/desktop" ] || [ -f "/tmp/asiraos/drivers" ] || \
@@ -25,6 +26,8 @@ basic_reset_config() {
           /tmp/asiraos/desktop \
           /tmp/asiraos/drivers \
           /tmp/asiraos/packages \
+          /tmp/asiraos/username \
+          /tmp/asiraos/password \
           /tmp/asiraos/hostname \
           /tmp/asiraos/swap \
           /tmp/asiraos/bootloader \
@@ -123,6 +126,7 @@ basic_start_menu() {
 
 basic_mask_password() {
     local pwd="${PASSWORD:-}"
+    [ -z "$pwd" ] && pwd=$(cat /tmp/asiraos/password 2>/dev/null || true)
     if [ -z "$pwd" ]; then
         echo "Not set"
     else
@@ -150,7 +154,9 @@ basic_show_status_box() {
     local keymap keymap_label user_val pass_val hostname_val disk_val table_output term_width clean_line left
     keymap=$(cat /tmp/asiraos/keymap 2>/dev/null || true)
     keymap_label=$(basic_keymap_label "$keymap")
-    user_val="${USERNAME:-Not set}"
+    user_val="${USERNAME:-}"
+    [ -z "$user_val" ] && user_val=$(cat /tmp/asiraos/username 2>/dev/null || true)
+    [ -z "$user_val" ] && user_val="Not set"
     pass_val=$(basic_mask_password)
     hostname_val=$(cat /tmp/asiraos/hostname 2>/dev/null || echo "Not set")
     disk_val=$(basic_selected_disk_label)
@@ -364,11 +370,19 @@ basic_step_7_packages() {
 
 # Step 8: User Creation
 basic_step_8_user() {
+    local saved_user saved_pass
     show_banner
     gum style --foreground 212 "Step 7/14: User Creation"
 
-    if [ -n "${USERNAME:-}" ] && [ -n "${PASSWORD:-}" ]; then
-        basic_ask_continue_or_change "user" "$USERNAME" "basic_step_7_packages"
+    saved_user="${USERNAME:-}"
+    saved_pass="${PASSWORD:-}"
+    [ -z "$saved_user" ] && saved_user=$(cat /tmp/asiraos/username 2>/dev/null || true)
+    [ -z "$saved_pass" ] && saved_pass=$(cat /tmp/asiraos/password 2>/dev/null || true)
+
+    if [ -n "$saved_user" ] && [ -n "$saved_pass" ]; then
+        USERNAME="$saved_user"
+        PASSWORD="$saved_pass"
+        basic_ask_continue_or_change "user" "$saved_user" "basic_step_7_packages"
         case $? in
             0) basic_step_9_hostname; return ;;
             2) return ;;
@@ -478,6 +492,7 @@ basic_step_15_install() {
     local choice
     show_banner
     gum style --foreground 212 "Step 14/14: Review and Install"
+    basic_show_status_box
 
     choice=$(gum choose "Continue to Install" "← Back")
     case "$choice" in
