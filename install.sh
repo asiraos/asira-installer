@@ -4,9 +4,17 @@
 # https://asiraos.github.io
 # Licensed under GPL-3.0
 
-
 # AsiraOS Installer - Main Script
 set -e
+check_internet() {
+    if ping -c 1 -W 2 8.8.8.8 &> /dev/null; then
+        echo "Internet connected successfully."
+        return 0
+    else
+        echo "No internet found launching nmtui."
+        nmtui
+    fi
+}
 sudo pacman -Sy --noconfirm archlinux-keyring >/dev/null 2>&1
 
 # Counter for quit attempts
