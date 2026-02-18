@@ -1,5 +1,28 @@
 #!/bin/bash
 
+resolve_parent_disk() {
+    local part="$1"
+    local parent
+    [ -z "$part" ] && return 1
+    parent=$(lsblk -no PKNAME "$part" 2>/dev/null | head -1)
+    [ -n "$parent" ] && echo "/dev/$parent"
+}
+
+get_bios_boot_install_target() {
+    local saved target root_part
+    saved=$(cat /tmp/asiraos/boot_target 2>/dev/null || true)
+    if [ -n "$saved" ] && [ -b "$saved" ]; then
+        echo "$saved"
+        return
+    fi
+
+    root_part=$(grep " -> /$" /tmp/asiraos/mounts 2>/dev/null | awk '{print $1}' | head -1)
+    target=$(resolve_parent_disk "$root_part")
+    if [ -n "$target" ] && [ -b "$target" ]; then
+        echo "$target"
+    fi
+}
+
 
 # Locale Selection
 locale_selection() {
@@ -604,9 +627,14 @@ perform_installation() {
         
         echo -e "KEYMAP=$KEYMAP\nFONT=" > /mnt/etc/vconsole.conf
 
-        # Get root partition device (remove partition number)
-        ROOT_DEVICE=$(grep " / " /tmp/asiraos/mounts | cut -d' ' -f1 | sed 's/[0-9]*$//')
-        arch-chroot /mnt grub-install "$ROOT_DEVICE"
+        BOOT_TARGET=$(get_bios_boot_install_target)
+        if [ -z "$BOOT_TARGET" ] || [ ! -b "$BOOT_TARGET" ]; then
+            gum style --foreground 196 "Could not determine BIOS boot install target disk."
+            gum style --foreground 214 "Set disk again in Disk Selection and retry."
+            gum input --placeholder "Press Enter to go back..."
+            return
+        fi
+        arch-chroot /mnt grub-install "$BOOT_TARGET"
     fi
     
     arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg

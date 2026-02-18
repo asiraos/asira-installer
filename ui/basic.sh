@@ -30,6 +30,7 @@ basic_reset_config() {
           /tmp/asiraos/hostname \
           /tmp/asiraos/swap \
           /tmp/asiraos/bootloader \
+          /tmp/asiraos/boot_target \
           /tmp/asiraos/kernel \
           /tmp/asiraos/mounts
     USERNAME=""
@@ -40,7 +41,9 @@ basic_reset_config() {
 basic_has_required_mounts() {
     [ -f /tmp/asiraos/mounts ] || return 1
     grep -q " -> /$" /tmp/asiraos/mounts || return 1
-    grep -q " -> /boot/efi$" /tmp/asiraos/mounts || grep -q " -> /boot$" /tmp/asiraos/mounts || return 1
+    if [ -d /sys/firmware/efi ]; then
+        grep -q " -> /boot/efi$" /tmp/asiraos/mounts || grep -q " -> /boot$" /tmp/asiraos/mounts || return 1
+    fi
     return 0
 }
 
