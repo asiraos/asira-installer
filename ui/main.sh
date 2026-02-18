@@ -34,14 +34,19 @@ main_menu() {
     
     gum style --foreground 214 "Choose your installation method:"
     echo ""
-    
-    CHOICE=$(gum choose --cursor-prefix "> " --selected-prefix "* " \
-        "Quick Installation" \
-        "Advanced Installation" \
-        "Font Scaling" \
-        "Exit")
+
+    MENU_OPTIONS=()
+    if command -v basic_has_saved_config >/dev/null 2>&1 && basic_has_saved_config; then
+        MENU_OPTIONS+=("Continue Setup")
+    fi
+    MENU_OPTIONS+=("Quick Installation" "Advanced Installation" "Font Scaling" "Exit")
+
+    CHOICE=$(gum choose --cursor-prefix "> " --selected-prefix "* " "${MENU_OPTIONS[@]}")
     
     case $CHOICE in
+        "Continue Setup")
+            basic_continue_from_startup
+            ;;
         "Quick Installation")
             basic_setup
             ;;

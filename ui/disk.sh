@@ -2,29 +2,74 @@
 
 # Get real disk and partition information
 get_real_disks() {
-    local parted_list
-    parted_list=$(parted -m -s -l 2>/dev/null | awk -F: '
-        /^\/dev\// {
-            dev=$1; size=$2
-            if (dev ~ /\/dev\/(loop|ram|zram)/) next
-            print dev " " size
-        }'
-    )
-    if [ -n "$parted_list" ]; then
-        echo "$parted_list" | while read -r dev size; do
+    # Prefer lsblk: it is more consistent across environments than parsing parted output.
+    local lsblk_list
+    lsblk_list=$(lsblk -dnpo NAME,SIZE,TYPE 2>/dev/null | awk '
+        $3=="disk" {
+            if ($1 ~ /\/dev\/(loop|ram|zram|fd)/) next
+            print $1" "$2
+        }')
+    if [ -n "$lsblk_list" ]; then
+        echo "$lsblk_list" | while read -r dev size; do
             [ -b "$dev" ] && echo "$dev $size"
         done
         return
     fi
 
-    lsblk -dnpo NAME,SIZE,TYPE 2>/dev/null | awk '$3=="disk"{print $1" "$2}'
+    parted -m -s -l 2>/dev/null | awk -F: '
+        /^\/dev\// {
+            dev=$1; size=$2
+            if (dev ~ /\/dev\/(loop|ram|zram|fd)/) next
+            print dev " " size
+        }'
 }
 
 get_real_partitions() {
     local disk=$1
-    lsblk -pnro NAME,SIZE,FSTYPE,MOUNTPOINT "$disk" 2>/dev/null | awk -v d="$disk" '$1 != d {print}' | while read -r name size fstype mount; do
-        echo "$name $size $fstype $mount"
-    done
+    local disk_name part_num part_dev part_size part_fstype part_mount part_role
+    disk_name=$(basename "$disk")
+
+    while IFS='|' read -r entry_type entry_part _start _end size_mib entry_fs entry_flags; do
+        [ "$entry_type" = "PART" ] || continue
+        [ -n "$entry_part" ] || continue
+
+        part_dev=$(partition_path "$disk_name" "$entry_part")
+        [ -b "$part_dev" ] || continue
+
+        part_size=$(lsblk -dnro SIZE "$part_dev" 2>/dev/null | head -1)
+        [ -z "$part_size" ] && part_size="$(humanize_mib "$size_mib")"
+
+        part_fstype=$(lsblk -dnro FSTYPE "$part_dev" 2>/dev/null | head -1)
+        [ -z "$part_fstype" ] && part_fstype="$entry_fs"
+        [ -z "$part_fstype" ] && part_fstype="unformatted"
+
+        part_mount=$(lsblk -dnro MOUNTPOINT "$part_dev" 2>/dev/null | head -1)
+        [ -z "$part_mount" ] && part_mount="-"
+
+        part_role=""
+        if [[ "$entry_flags" == *esp* ]] || [[ "$part_fstype" =~ ^(vfat|fat|fat16|fat32)$ ]]; then
+            part_role="EFI-System"
+        fi
+
+        echo "${part_dev}|${part_size}|${part_fstype}|${part_mount}|${part_role}"
+    done < <(get_parted_layout "$disk")
+}
+
+get_partition_fstype() {
+    local partition="$1"
+    local fs
+    fs=$(lsblk -dnro FSTYPE "$partition" 2>/dev/null | head -1)
+    if [ -z "$fs" ]; then
+        fs=$(blkid -o value -s TYPE "$partition" 2>/dev/null | head -1)
+    fi
+    echo "${fs,,}"
+}
+
+is_efi_fs_type() {
+    case "${1,,}" in
+        vfat|fat|fat16|fat32) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 get_free_regions() {
@@ -35,6 +80,24 @@ get_free_regions() {
             start=n($2); stop=n($3); size=n($4)
             if (stop > start && size > 1) {
                 printf "%.2f %.2f %.2f\n", start, stop, size
+            }
+        }
+    '
+}
+
+get_parted_layout() {
+    local disk=$1
+    parted -m -s "$disk" unit MiB print free 2>/dev/null | awk -F: '
+        function n(v) { gsub(/[^0-9.]/, "", v); return v + 0 }
+        $1 ~ /^[0-9]+$/ {
+            start=n($2); stop=n($3); size=n($4)
+            fs=tolower($5); flags=tolower($7)
+            if (stop <= start || size <= 0) next
+
+            if (fs == "free" || $0 ~ /:free;$/) {
+                printf "FREE||%.2f|%.2f|%.2f||\n", start, stop, size
+            } else {
+                printf "PART|%s|%.2f|%.2f|%.2f|%s|%s\n", $1, start, stop, size, fs, flags
             }
         }
     '
@@ -332,6 +395,10 @@ manual_partition() {
             gum style --foreground 214 "Opening cfdisk for /dev/$DISK"
             sleep 1
             cfdisk /dev/$DISK
+            partprobe /dev/$DISK 2>/dev/null || true
+            if command -v udevadm >/dev/null 2>&1; then
+                udevadm settle 2>/dev/null || true
+            fi
             echo -e "${GREEN}Partitioning completed for /dev/$DISK${NC}"
             gum input --placeholder "Press Enter to continue..."
             manual_partition
@@ -354,18 +421,18 @@ set_mountpoints() {
     
     # Get real partitions for this disk
     PARTITION_OPTIONS=()
-    while read -r part_line; do
-        if [ -n "$part_line" ]; then
-            part_name=$(echo "$part_line" | awk '{print $1}' | sed 's|/dev/||')
-            part_size=$(echo "$part_line" | awk '{print $2}')
-            part_fstype=$(echo "$part_line" | awk '{print $3}')
-            part_mount=$(echo "$part_line" | awk '{print $4}')
-            
-            if [ "$part_fstype" = "" ]; then
-                part_fstype="unformatted"
+    PARTITION_VALUES=()
+    while IFS='|' read -r part_dev part_size part_fstype part_mount part_role; do
+        if [ -n "$part_dev" ]; then
+            part_name="${part_dev#/dev/}"
+            [ -z "$part_fstype" ] && part_fstype="unformatted"
+
+            if [ -n "$part_role" ]; then
+                PARTITION_OPTIONS+=("$part_name ($part_size, $part_fstype, $part_role)")
+            else
+                PARTITION_OPTIONS+=("$part_name ($part_size, $part_fstype)")
             fi
-            
-            PARTITION_OPTIONS+=("$part_name ($part_size, $part_fstype)")
+            PARTITION_VALUES+=("$part_name")
         fi
     done < <(get_real_partitions "/dev/$disk")
     
@@ -380,7 +447,13 @@ set_mountpoints() {
     # Let user select partition
     gum style --foreground 46 "Select partition:"
     SELECTED_OPTION=$(gum choose --cursor-prefix "> " --selected-prefix "* " "${PARTITION_OPTIONS[@]}")
-    PARTITION=$(echo "$SELECTED_OPTION" | awk '{print $1}' | tr -d '│├└─')
+    PARTITION=""
+    for i in "${!PARTITION_OPTIONS[@]}"; do
+        if [ "${PARTITION_OPTIONS[$i]}" = "$SELECTED_OPTION" ]; then
+            PARTITION="${PARTITION_VALUES[$i]}"
+            break
+        fi
+    done
 
     # Normalize partition name (remove /dev/ if already present)
     PARTITION="${PARTITION#/dev/}"
@@ -405,12 +478,8 @@ set_mountpoints() {
             "/tmp" \
             "Custom")
     else
-        MOUNTPOINT=$(gum choose --cursor-prefix "> " --selected-prefix "* " \
-            "/" \
-            "/home" \
-            "/var" \
-            "/tmp" \
-            "Custom")
+        gum style --foreground 46 "BIOS mode: select root partition for /"
+        MOUNTPOINT="/"
     fi
     
     if [ "$MOUNTPOINT" = "Custom" ]; then
@@ -432,6 +501,14 @@ set_mountpoints() {
     
     if [ "$FORMAT_CHOICE" = "Format partition" ]; then
         format_partition "/dev/$PARTITION" "$MOUNTPOINT"
+    elif is_efi_boot_mode && { [ "$MOUNTPOINT" = "/boot" ] || [ "$MOUNTPOINT" = "/boot/efi" ]; }; then
+        CURRENT_FS=$(get_partition_fstype "/dev/$PARTITION")
+        if ! is_efi_fs_type "$CURRENT_FS"; then
+            gum style --foreground 196 "EFI boot mount requires FAT32 (EFI System) partition"
+            gum input --placeholder "Press Enter to choose again..."
+            set_mountpoints "$disk"
+            return
+        fi
     fi
     
     # Save mountpoint configuration
@@ -442,6 +519,13 @@ set_mountpoints() {
         [ -n "$ROOT_DISK" ] && set_bios_boot_target "$ROOT_DISK"
     fi
     gum style --foreground 46 "Mountpoint set: /dev/$PARTITION -> $MOUNTPOINT"
+
+    if ! is_efi_boot_mode; then
+        gum style --foreground 46 "BIOS root partition configured. Continue to next step."
+        gum input --placeholder "Press Enter to continue..."
+        disk_selection
+        return
+    fi
     
     CHOICE=$(gum choose --cursor-prefix "> " --selected-prefix "* " \
         "Set Another Mountpoint" \
@@ -563,12 +647,8 @@ set_mountpoints_for_partition() {
             "/tmp" \
             "Custom")
     else
-        MOUNTPOINT=$(gum choose --cursor-prefix "> " --selected-prefix "* " \
-            "/" \
-            "/home" \
-            "/var" \
-            "/tmp" \
-            "Custom")
+        gum style --foreground 46 "BIOS mode: new partition will be used as /"
+        MOUNTPOINT="/"
     fi
     
     if [ "$MOUNTPOINT" = "Custom" ]; then
@@ -594,6 +674,13 @@ set_mountpoints_for_partition() {
         [ -n "$ROOT_DISK" ] && set_bios_boot_target "$ROOT_DISK"
     fi
     gum style --foreground 46 "Mountpoint set: /dev/$partition -> $MOUNTPOINT"
+
+    if ! is_efi_boot_mode; then
+        gum style --foreground 46 "BIOS root partition configured. Continue to next step."
+        gum input --placeholder "Press Enter to continue..."
+        disk_selection
+        return
+    fi
     
     disk_selection
 }
@@ -603,7 +690,10 @@ format_partition() {
     local partition=$1
     local mountpoint=$2
     
-    if [ "$mountpoint" = "/boot/efi" ]; then
+    if is_efi_boot_mode && { [ "$mountpoint" = "/boot/efi" ] || [ "$mountpoint" = "/boot" ]; }; then
+        gum style --foreground 205 "Formatting $partition as EFI System (FAT32)..."
+        mkfs.fat -F32 "$partition"
+    elif [ "$mountpoint" = "/boot/efi" ]; then
         gum style --foreground 205 "Formatting $partition as EFI System (FAT32)..."
         mkfs.fat -F32 "$partition"
     elif [ "$mountpoint" = "/boot" ]; then
@@ -691,74 +781,94 @@ auto_partition() {
     echo ""
 
     gum style --foreground 46 "Detecting available storage..."
-    ALL_OPTIONS=()
-
-    # ---- DISK SCAN (parted-backed) ----
+    DISK_OPTIONS=()
     while read -r disk size; do
         [ -z "$disk" ] && continue
-        [[ "$disk" != /dev/* ]] && disk="/dev/$disk"
         [ ! -b "$disk" ] && continue
         disk_name=$(basename "$disk")
-
-        ALL_OPTIONS+=("DISK|$disk_name|$size")
-
-        # Add each meaningful free-space region (>= 512MiB).
-        while read -r free_start free_end free_size_mib; do
-            [ -z "$free_size_mib" ] && continue
-            if awk "BEGIN {exit !($free_size_mib >= 512)}"; then
-                ALL_OPTIONS+=("FREE|$disk_name|$free_size_mib|$free_start|$free_end")
-            fi
-        done < <(get_free_regions "$disk")
-
-        # partitions
-        while read -r p s f m; do
-            [ -z "$p" ] && continue
-            part_name=$(basename "$p")
-            ALL_OPTIONS+=("PART|$part_name|$s|${f:-unformatted}")
-        done < <(get_real_partitions "$disk")
-
+        DISK_OPTIONS+=("$disk_name ($size)")
     done < <(get_real_disks)
 
-    [ ${#ALL_OPTIONS[@]} -eq 0 ] && {
+    [ ${#DISK_OPTIONS[@]} -eq 0 ] && {
         gum style --foreground 196 "No storage devices found"
         gum input --placeholder "Press Enter..."
         return
     }
 
-    # ---- UI ----
+    gum style --foreground 46 "Select disk:"
+    SELECTED_DISK_UI=$(gum choose --cursor-prefix "> " --selected-prefix "* " "${DISK_OPTIONS[@]}")
+    TARGET_DISK=$(echo "$SELECTED_DISK_UI" | awk '{print $1}')
+    TARGET_DISK="${TARGET_DISK#/dev/}"
+    [ -z "$TARGET_DISK" ] && return
+    [ ! -b "/dev/$TARGET_DISK" ] && {
+        gum style --foreground 196 "Invalid disk selected: /dev/$TARGET_DISK"
+        gum input --placeholder "Press Enter..."
+        return
+    }
+
+    # Build target options for selected disk only (from parted layout).
+    ALL_OPTIONS=()
     DISPLAY=()
-    for opt in "${ALL_OPTIONS[@]}"; do
-        IFS='|' read -r t n s f start end <<< "$opt"
-        case "$t" in
-            DISK) DISPLAY+=("$n ($s) - Whole Disk") ;;
-            FREE) DISPLAY+=(" └─ free space on $n ($(humanize_mib "$s"), ${start}MiB-${end}MiB)") ;;
-            PART) DISPLAY+=(" └─ $n ($s, $f)") ;;
-        esac
-    done
 
-    SELECTED_UI=$(gum choose "${DISPLAY[@]}")
+    disk_size=$(echo "$SELECTED_DISK_UI" | sed -E 's/^[^ ]+ \((.*)\)$/\1/')
+    ALL_OPTIONS+=("DISK|$TARGET_DISK|$disk_size")
+    DISPLAY+=("/dev/$TARGET_DISK ($disk_size) - Whole Disk")
 
-    # ---- PARSE SELECTION SAFELY ----
+    while IFS='|' read -r entry_type part_num start_mib end_mib size_mib fstype flags; do
+        [ -z "$entry_type" ] && continue
+        if [ "$entry_type" = "PART" ]; then
+            part_dev=$(partition_path "$TARGET_DISK" "$part_num")
+            part_name=$(basename "$part_dev")
+            part_fstype=${fstype:-unformatted}
+            ALL_OPTIONS+=("PART|$TARGET_DISK|$part_num|$size_mib|$part_fstype|$flags")
+            DISPLAY+=("  ├─ partition: /dev/$part_name ($(humanize_mib "$size_mib"), $part_fstype)")
+        elif [ "$entry_type" = "FREE" ]; then
+            if awk "BEGIN {exit !($size_mib >= 512)}"; then
+                ALL_OPTIONS+=("FREE|$TARGET_DISK|$size_mib|$start_mib|$end_mib")
+                DISPLAY+=("  └─ free space: $(humanize_mib "$size_mib") (${start_mib}MiB-${end_mib}MiB)")
+            fi
+        fi
+    done < <(get_parted_layout "/dev/$TARGET_DISK")
+
+    TARGET_OPTION=$(gum choose --cursor-prefix "> " --selected-prefix "* " "${DISPLAY[@]}")
+    TARGET_INDEX=-1
     for i in "${!DISPLAY[@]}"; do
-        if [ "${DISPLAY[$i]}" = "$SELECTED_UI" ]; then
-            IFS='|' read -r TYPE NAME SIZE FSTYPE FREE_START_MIB FREE_END_MIB <<< "${ALL_OPTIONS[$i]}"
+        if [ "${DISPLAY[$i]}" = "$TARGET_OPTION" ]; then
+            TARGET_INDEX="$i"
             break
         fi
     done
+    [ "$TARGET_INDEX" -lt 0 ] && return
+    IFS='|' read -r TYPE FIELD2 FIELD3 FIELD4 FIELD5 FIELD6 <<< "${ALL_OPTIONS[$TARGET_INDEX]}"
 
     echo ""
-    gum style --foreground 46 "Selected: $TYPE → /dev/$NAME"
+    case "$TYPE" in
+        DISK) gum style --foreground 46 "Selected: Whole Disk → /dev/$FIELD2" ;;
+        PART)
+            TARGET_PART_PREVIEW=$(partition_path "$FIELD2" "$FIELD3")
+            gum style --foreground 46 "Selected: Partition → $TARGET_PART_PREVIEW"
+            ;;
+        FREE) gum style --foreground 46 "Selected: Free Space → /dev/$FIELD2 (${FIELD4}MiB-${FIELD5}MiB)" ;;
+    esac
 
     # ---- MODE ----
     case "$TYPE" in
-        DISK) MODE="wholedisk"; TARGET_DISK="$NAME" ;;
+        DISK)
+            MODE="wholedisk"
+            TARGET_DISK="$FIELD2"
+            ;;
         FREE)
             MODE="freespace"
-            TARGET_DISK="$NAME"
-            TARGET_FREE_START="$FREE_START_MIB"
-            TARGET_FREE_END="$FREE_END_MIB"
+            TARGET_DISK="$FIELD2"
+            TARGET_FREE_START="$FIELD4"
+            TARGET_FREE_END="$FIELD5"
             ;;
-        PART) MODE="partition"; TARGET_PART="/dev/$NAME" ;;
+        PART)
+            MODE="partition"
+            TARGET_DISK="$FIELD2"
+            TARGET_PART_NUM="$FIELD3"
+            TARGET_PART=$(partition_path "$TARGET_DISK" "$TARGET_PART_NUM")
+            ;;
     esac
 
     gum style --foreground 196 "⚠ This may ERASE data"

@@ -6,6 +6,18 @@ basic_setup() {
     basic_start_menu
 }
 
+basic_continue_from_startup() {
+    BASIC_MODE=true
+    BASIC_RESUME_MODE=true
+    if basic_has_saved_config; then
+        local next_step
+        next_step=$(basic_next_incomplete_step)
+        "$next_step"
+    else
+        basic_step_1_keyboard
+    fi
+}
+
 basic_has_saved_config() {
     [ -n "${USERNAME:-}" ] || [ -n "${PASSWORD:-}" ] || \
     [ -f "/tmp/asiraos/username" ] || [ -f "/tmp/asiraos/password" ] || \
