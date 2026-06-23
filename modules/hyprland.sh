@@ -6,8 +6,10 @@ DOTFILES="/tmp/asira-hypr-dots"
 # Hyprland Desktop Environment Installation
 echo "Installing Hyprland Desktop Environment..."
 
-pacman -S --noconfirm --needed hyprland waybar wofi kitty sddm git
+pacman -S --noconfirm --needed hyprland waybar wofi kitty sddm git hyprpolkitagent dms-shell-hyprland dms-shell nautilus starship ttf-firacode-nerd file-roller flatpak pamac
+
 systemctl enable sddm
+systemctl enable hyprpolkitagent
 
 install_grubthemes() {
   sudo mkdir -p /boot/grub/themes/
