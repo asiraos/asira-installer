@@ -43,6 +43,10 @@ EOF
   fi
   
   # Configure GRUB theme script
+
+cp -r ./asiraos.png /boot/grub/themes/shared/
+cp -r ./asiraos.png /boot/grub/themes/shared/asiraos.png
+
   cat > /etc/grub.d/05_asiraos_theme << 'EOF'
 #!/bin/bash
 
