@@ -1,12 +1,20 @@
 #!/bin/bash
 
 # Get real disk and partition information
+is_supported_disk_name() {
+    case "$1" in
+        loop*|ram*|zram*|fd*|sr*) return 1 ;;
+        nvme*n*|mmcblk*|sd*|hd*|vd*|xvd*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 get_real_disks() {
     # Prefer lsblk: it is more consistent across environments than parsing parted output.
     local lsblk_list
     lsblk_list=$(lsblk -dnpo NAME,SIZE,TYPE 2>/dev/null | awk '
         $3=="disk" {
-            if ($1 ~ /\/dev\/(loop|ram|zram|fd)/) next
+            if ($1 ~ /\/dev\/(loop|ram|zram|fd|sr)/) next
             print $1" "$2
         }')
     if [ -n "$lsblk_list" ]; then
@@ -16,10 +24,31 @@ get_real_disks() {
         return
     fi
 
+    local sys_disk disk_name disk_path disk_size
+    for sys_disk in /sys/block/*; do
+        [ -e "$sys_disk" ] || continue
+        disk_name=$(basename "$sys_disk")
+        if ! is_supported_disk_name "$disk_name"; then
+            continue
+        fi
+
+        disk_path="/dev/$disk_name"
+        [ -b "$disk_path" ] || continue
+
+        disk_size=$(lsblk -dnro SIZE "$disk_path" 2>/dev/null | head -1)
+        if [ -z "$disk_size" ]; then
+            disk_size="unknown"
+        fi
+
+        echo "$disk_path $disk_size"
+    done
+
     parted -m -s -l 2>/dev/null | awk -F: '
         /^\/dev\// {
-            dev=$1; size=$2
-            if (dev ~ /\/dev\/(loop|ram|zram|fd)/) next
+            dev=$1; size=$2; name=dev
+            sub("^/dev/", "", name)
+            if (dev ~ /\/dev\/(loop|ram|zram|fd|sr)/) next
+            if (name !~ /^(nvme[0-9]+n[0-9]+|mmcblk[0-9]+|sd[a-z]+|hd[a-z]+|vd[a-z]+|xvd[a-z]+)$/) next
             print dev " " size
         }'
 }
@@ -28,6 +57,40 @@ get_real_partitions() {
     local disk=$1
     local disk_name part_num part_dev part_size part_fstype part_mount part_role
     disk_name=$(basename "$disk")
+
+    local lsblk_entry NAME TYPE SIZE FSTYPE MOUNTPOINT PARTTYPE PARTFLAGS
+    local lsblk_found=false
+    while IFS= read -r lsblk_entry; do
+        [ -n "$lsblk_entry" ] || continue
+
+        unset NAME TYPE SIZE FSTYPE MOUNTPOINT PARTTYPE PARTFLAGS
+        eval "$lsblk_entry"
+
+        case "$TYPE" in
+            part|crypt|lvm|raid0|raid1|raid10|linear) ;;
+            *) continue ;;
+        esac
+
+        [ -n "$NAME" ] || continue
+        [ "$NAME" != "$disk" ] || continue
+        [ -b "$NAME" ] || continue
+
+        part_size="${SIZE:-unknown}"
+        part_fstype="${FSTYPE:-unformatted}"
+        part_mount="${MOUNTPOINT:--}"
+        part_role=""
+
+        if [[ "${PARTFLAGS,,}" == *esp* ]] || [[ "${PARTFLAGS,,}" == *boot* ]] || \
+           [[ "${PARTTYPE,,}" == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" ]] || \
+           [[ "${part_fstype,,}" =~ ^(vfat|fat|fat16|fat32)$ ]]; then
+            part_role="EFI-System"
+        fi
+
+        lsblk_found=true
+        echo "${NAME}|${part_size}|${part_fstype}|${part_mount}|${part_role}"
+    done < <(lsblk -P -pnro NAME,TYPE,SIZE,FSTYPE,MOUNTPOINT,PARTTYPE,PARTFLAGS "$disk" 2>/dev/null)
+
+    [ "$lsblk_found" = true ] && return
 
     while IFS='|' read -r entry_type entry_part _start _end size_mib entry_fs entry_flags; do
         [ "$entry_type" = "PART" ] || continue
@@ -138,6 +201,25 @@ partition_path() {
 
 find_efi_partition_on_disk() {
     local disk="$1"
+    local lsblk_entry NAME TYPE FSTYPE PARTTYPE PARTFLAGS
+
+    while IFS= read -r lsblk_entry; do
+        [ -n "$lsblk_entry" ] || continue
+        unset NAME TYPE FSTYPE PARTTYPE PARTFLAGS
+        eval "$lsblk_entry"
+
+        case "$TYPE" in
+            part|crypt|lvm|raid0|raid1|raid10|linear) ;;
+            *) continue ;;
+        esac
+
+        if [[ "${PARTFLAGS,,}" == *esp* ]] || [[ "${PARTTYPE,,}" == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" ]] || \
+           [[ "${FSTYPE,,}" =~ ^(vfat|fat|fat16|fat32)$ ]]; then
+            echo "$NAME"
+            return
+        fi
+    done < <(lsblk -P -pnro NAME,TYPE,FSTYPE,PARTTYPE,PARTFLAGS "$disk" 2>/dev/null)
+
     local partnum
     partnum=$(parted -m -s "$disk" print 2>/dev/null | awk -F: '
         $1 ~ /^[0-9]+$/ {
